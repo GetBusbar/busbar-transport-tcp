@@ -1,0 +1,29 @@
+# SPDX-License-Identifier: Apache-2.0
+[package]
+name = "busbar-transport-tcp-plugin"
+version = "1.6.0"
+publish = false            # first-party signed cdylib, shipped as a packed/signed tarball, not to crates.io
+edition = "2021"
+rust-version = "1.97"
+description = "First-party signed kind:transport plugin cdylib: the `tcp` transport, packaged as a droppable busbar plugin. Drop the signed tarball into `plugins/` and the boot seal folds the wire beside the linked ones."
+license = "Apache-2.0"
+
+[lib]
+# cdylib: the DROPPED-IN door (a signed tarball in `plugins/`). rlib: REQUIRED for `cargo test` to
+# emit the cdylib artifact the conformance test packs (a cdylib-only package builds a trivial test
+# harness and never produces the .so/.dylib — the store-postgres-plugin / store-mysql-plugin note).
+crate-type = ["cdylib", "rlib"]
+
+[dependencies]
+# THE WIRE, same repo, with its dropped-in door on: `dropped-in` compiles the wire's one door
+# registration (`busbar_contract::export_transport!`), so this crate only makes that door a loadable
+# library. A busbar build that LINKS the wire names the logic crate without the feature.
+busbar-transport-tcp = { path = "../transport-tcp", features = ["dropped-in"] }
+
+[dev-dependencies]
+# The conformance test admits the wire's decl through the LINKED door and dlopens the built cdylib
+# through the DROPPED-IN door, over the REAL loader (sign, pack, scan, open) — dev-only, never in the
+# shipped artifact. Same pinned rev as the logic crate's busbar-contract, so one busbar source
+# resolves.
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "81724a0b58d2ca77b2ce02cc141158fd20be5469" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "81724a0b58d2ca77b2ce02cc141158fd20be5469" }
