@@ -35,7 +35,7 @@ tokio-util = { version = "0.7", default-features = false, features = ["compat"] 
 # The ONE busbar crate a plugin names (#40: contract only). Pinned by git rev to the busbar commit in
 # `.busbar-ref`; a busbar build that links this crate `[patch]`es the busbar git source to its own
 # tree, so ONE copy of the contract links.
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "04453ebb5fbbd868c1b5a21a26225a17014c1b2d" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "7a5b429041752e00375e120ab1547a8928c3dee4" }
 futures = "0.3"
 tokio = { version = "1", features = ["net", "rt", "sync", "io-util", "time"] }
 
@@ -43,5 +43,5 @@ tokio = { version = "1", features = ["net", "rt", "sync", "io-util", "time"] }
 # The TEST-ONLY seal (#65). `busbar_contract::plugin::TestKernelSeal` is the one blessed
 # fixture implementor of the SEALED `KernelSeal` trait; this crate's test harnesses used to
 # forge their own. Dev-only and feature-gated, so it is absent from every release build.
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "04453ebb5fbbd868c1b5a21a26225a17014c1b2d", features = ["test-seal"] }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "7a5b429041752e00375e120ab1547a8928c3dee4", features = ["test-seal"] }
 tokio = { version = "1", features = ["net", "rt-multi-thread", "sync", "io-util", "time", "macros", "test-util"] }
