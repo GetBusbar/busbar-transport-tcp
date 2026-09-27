@@ -25,5 +25,5 @@ busbar-transport-tcp = { path = "../transport-tcp", features = ["dropped-in"] }
 # through the DROPPED-IN door, over the REAL loader (sign, pack, scan, open) — dev-only, never in the
 # shipped artifact. Same pinned rev as the logic crate's busbar-contract, so one busbar source
 # resolves.
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "81724a0b58d2ca77b2ce02cc141158fd20be5469" }
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "81724a0b58d2ca77b2ce02cc141158fd20be5469" }
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "5b783c8a4de5d1b5c0cab6f490b6274e5a6950c4" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "5b783c8a4de5d1b5c0cab6f490b6274e5a6950c4" }
