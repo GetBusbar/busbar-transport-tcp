@@ -9,24 +9,24 @@ description = "The tcp transport: a byte stream, the base every session transpor
 license = "Apache-2.0"
 
 [lib]
-# rlib: THE WIRE. The busbar composition root links it (its `linked` row and `hot::TRANSPORT_DECL`,
-# the linked door), and the sibling `busbar-transport-tcp-plugin` cdylib re-exports it with the
-# `dropped-in` feature on as the dropped-in door (the same decl, exported as `busbar_transport_decl`
-# for the loader to `dlopen`). One source, both doors (#3: a transport is swappable, compiled in OR
-# dropped in, over the HOT lane).
+# rlib: THE CARRIER. The busbar composition root links it (its `TcpCarrier` as the contract's
+# `Carrier`, the linked door), and the sibling `busbar-transport-tcp-plugin` cdylib re-exports it with
+# the `dropped-in` feature on as the dropped-in door (the same carrier lowered by the contract's
+# `export_carrier!` to the HOT decl, exported as `busbar_transport_decl` for the loader to `dlopen`).
+# One source, both doors (#3: a transport is swappable, compiled in OR dropped in, over the HOT lane).
 crate-type = ["rlib"]
 
 # DEPENDENCY POLICY. A transport is a plugin (#3), so its closure is `busbar-contract` plus the async
-# runtime and stream plumbing it actually needs: no plane, no kernel crate, no capability crate, and
-# not the crate that defines the HOT lane either — `src/hot.rs` restates the published layout it
-# implements (#84: a layout, not a crate).
+# runtime and stream plumbing it actually needs: no plane, no kernel crate, no capability crate. Its
+# HOT-lane door is the contract's own lowering of its `Carrier` (`export_carrier!`), so no layout is
+# restated here (#84).
 [features]
-# THE DROPPED-IN DOOR (`hot::exports`): this crate's decl registered as its image's one door through
+# THE DROPPED-IN DOOR (`exports`): this crate's carrier, lowered and registered as its image's one door through
 # the contract's SHARED door (`busbar_contract::export_transport!`, the #84 merge). The frozen symbols
 # (`busbar_abi`, `busbar_plugin_kind`, `busbar_transport_decl`) are defined ONCE, in the contract, so
 # this crate defines none and a link holding it beside the other plugins holds one definition of each
 # (the fat-LTO "symbol multiply defined" refusal the per-crate symbols caused). OFF in a build that
-# links this crate (the linked door is `hot::TRANSPORT_DECL`); the dropped-in artifact is built on its
+# links this crate (the linked door is `TcpCarrier` itself); the dropped-in artifact is built on its
 # own, by the sibling adapter: `cargo build -p busbar-transport-tcp-plugin --release`.
 dropped-in = []
 
@@ -35,7 +35,7 @@ tokio-util = { version = "0.7", default-features = false, features = ["compat"] 
 # The ONE busbar crate a plugin names (#40: contract only). Pinned by git rev to the busbar commit in
 # `.busbar-ref`; a busbar build that links this crate `[patch]`es the busbar git source to its own
 # tree, so ONE copy of the contract links.
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "5b783c8a4de5d1b5c0cab6f490b6274e5a6950c4" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "04453ebb5fbbd868c1b5a21a26225a17014c1b2d" }
 futures = "0.3"
 tokio = { version = "1", features = ["net", "rt", "sync", "io-util", "time"] }
 
@@ -43,5 +43,5 @@ tokio = { version = "1", features = ["net", "rt", "sync", "io-util", "time"] }
 # The TEST-ONLY seal (#65). `busbar_contract::plugin::TestKernelSeal` is the one blessed
 # fixture implementor of the SEALED `KernelSeal` trait; this crate's test harnesses used to
 # forge their own. Dev-only and feature-gated, so it is absent from every release build.
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "5b783c8a4de5d1b5c0cab6f490b6274e5a6950c4", features = ["test-seal"] }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "04453ebb5fbbd868c1b5a21a26225a17014c1b2d", features = ["test-seal"] }
 tokio = { version = "1", features = ["net", "rt-multi-thread", "sync", "io-util", "time", "macros", "test-util"] }

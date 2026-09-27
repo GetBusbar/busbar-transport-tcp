@@ -15,8 +15,8 @@ license = "Apache-2.0"
 crate-type = ["cdylib", "rlib"]
 
 [dependencies]
-# THE WIRE, same repo, with its dropped-in door on: `dropped-in` compiles the wire's one door
-# registration (`busbar_contract::export_transport!`), so this crate only makes that door a loadable
+# THE CARRIER, same repo, with its dropped-in door on: `dropped-in` compiles the carrier's one door
+# registration (`busbar_contract::export_carrier!`), so this crate only makes that door a loadable
 # library. A busbar build that LINKS the wire names the logic crate without the feature.
 busbar-transport-tcp = { path = "../transport-tcp", features = ["dropped-in"] }
 
@@ -25,5 +25,5 @@ busbar-transport-tcp = { path = "../transport-tcp", features = ["dropped-in"] }
 # through the DROPPED-IN door, over the REAL loader (sign, pack, scan, open) — dev-only, never in the
 # shipped artifact. Same pinned rev as the logic crate's busbar-contract, so one busbar source
 # resolves.
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "5b783c8a4de5d1b5c0cab6f490b6274e5a6950c4" }
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "5b783c8a4de5d1b5c0cab6f490b6274e5a6950c4" }
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "04453ebb5fbbd868c1b5a21a26225a17014c1b2d" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "04453ebb5fbbd868c1b5a21a26225a17014c1b2d" }
