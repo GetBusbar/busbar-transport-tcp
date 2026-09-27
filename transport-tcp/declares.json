@@ -1,6 +1,6 @@
 {
   "contract_abi": {
-    "min": 32,
-    "max": 32
+    "min": 33,
+    "max": 33
   }
 }
