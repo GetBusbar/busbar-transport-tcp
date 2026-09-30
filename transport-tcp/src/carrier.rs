@@ -208,13 +208,25 @@ impl Carrier for TcpCarrier {
             return Poll::Ready(Err(TransportError::Closed));
         };
         let _in = self.reactor.handle.enter();
-        let (stream, peer) = std::task::ready!(listening.poll_accept(cx))
-            .map_err(|e| TcpTransport::map_io_err(&e))?;
-        let conn = self
-            .tcp
-            .register(stream, peer)
-            .map_err(|e| TcpTransport::map_io_err(&e))?;
-        Poll::Ready(Ok((conn.id(), conn.peer())))
+        for _ in 0..crate::ACCEPT_BUDGET {
+            let (stream, peer) = match std::task::ready!(listening.poll_accept(cx)) {
+                Ok(accepted) => accepted,
+                // A live listener's accept error is never `Closed`: that would end the host's
+                // accept loop for good (`TcpTransport::accept_err`).
+                Err(e) => match TcpTransport::accept_err(&e) {
+                    None => continue,
+                    Some(err) => return Poll::Ready(Err(err)),
+                },
+            };
+            let conn = self
+                .tcp
+                .register(stream, peer)
+                .map_err(|e| TcpTransport::map_io_err(&e))?;
+            return Poll::Ready(Ok((conn.id(), conn.peer())));
+        }
+        // A run of connections each gone before it was taken: yield, and be polled again at once.
+        cx.waker().wake_by_ref();
+        Poll::Pending
     }
 
     fn dial(&self, dest: &Dest<'_>) -> Result<u64, TransportError> {

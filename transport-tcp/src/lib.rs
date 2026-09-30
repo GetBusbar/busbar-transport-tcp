@@ -67,6 +67,10 @@ pub const READ_CHUNK_BYTES: usize = 16 * 1024;
 /// there at all, and still bounds the wait when it is not.
 pub const DIAL_TIMEOUT: Duration = Duration::from_secs(10);
 
+/// How many connections one accept may pass over — each gone before it could be taken — before it
+/// yields to the caller's executor rather than spinning on a flood of them.
+const ACCEPT_BUDGET: usize = 32;
+
 /// One connection's live state. Never reachable from the opaque [`Conn`] handle directly; only
 /// through this transport's own registry, keyed by [`ConnHandle::id`].
 /// A connection's read half and the buffer every read on it fills.
@@ -248,9 +252,21 @@ impl TcpTransport {
             .get(addr)
             .cloned()
             .ok_or(TransportError::Closed)?;
-        let (stream, peer) = listener.accept().await.map_err(|e| Self::map_io_err(&e))?;
-        self.register(stream, peer)
-            .map_err(|e| Self::map_io_err(&e))
+        loop {
+            for _ in 0..ACCEPT_BUDGET {
+                let (stream, peer) = match listener.accept().await {
+                    Ok(accepted) => accepted,
+                    Err(e) => match Self::accept_err(&e) {
+                        None => continue,
+                        Some(err) => return Err(err),
+                    },
+                };
+                return self
+                    .register(stream, peer)
+                    .map_err(|e| Self::map_io_err(&e));
+            }
+            tokio::task::yield_now().await;
+        }
     }
 
     /// Dial an admitted `authority` (`host:port`). What `dial` does once the destination has been
@@ -506,6 +522,26 @@ impl TcpTransport {
                 TransportError::AddressRefused
             }
             _ => TransportError::Closed,
+        }
+    }
+
+    /// What an error from a LIVE listener's `accept()` means: `None` when it was one connection's
+    /// (the peer aborted it before it was taken) or an interrupted call, so the next connection is
+    /// taken at once, as 1.5.5's accept loops did; otherwise the error to answer, and never
+    /// [`TransportError::Closed`].
+    ///
+    /// `Closed` from an accept tells the host the listener is gone, and its accept loop stops for
+    /// good. A listener this transport still holds is not gone: out of descriptors (EMFILE, ENFILE),
+    /// buffers (ENOBUFS) or memory is a condition that passes, so what [`Self::map_io_err`] would
+    /// call `Closed` is [`TransportError::Backpressure`] here, which the host absorbs with its
+    /// accept backoff and then accepts again. Only an unknown listener answers `Closed`.
+    fn accept_err(e: &io::Error) -> Option<TransportError> {
+        match e.kind() {
+            io::ErrorKind::ConnectionAborted | io::ErrorKind::Interrupted => None,
+            _ => Some(match Self::map_io_err(e) {
+                TransportError::Closed => TransportError::Backpressure,
+                other => other,
+            }),
         }
     }
 

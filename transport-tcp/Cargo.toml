@@ -45,3 +45,8 @@ tokio = { version = "1", features = ["net", "rt", "sync", "io-util", "time"] }
 # forge their own. Dev-only and feature-gated, so it is absent from every release build.
 busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "7a5b429041752e00375e120ab1547a8928c3dee4", features = ["test-seal"] }
 tokio = { version = "1", features = ["net", "rt-multi-thread", "sync", "io-util", "time", "macros", "test-util"] }
+
+[target.'cfg(unix)'.dev-dependencies]
+# The forced-EMFILE cell (tests/accept_emfile.rs) lowers RLIMIT_NOFILE, which std cannot, and the
+# accept-error table cell names the raw errno values. Already in the lock through tokio.
+libc = "0.2"

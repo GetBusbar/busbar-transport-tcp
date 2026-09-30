@@ -397,6 +397,41 @@ fn every_io_error_kind_maps_through_the_table() {
     }
 }
 
+/// A LIVE listener's accept error never answers `Closed`, which the host reads as the listener gone
+/// and ends its accept loop on for good (TCP-1). Descriptor, buffer and memory exhaustion answer
+/// `Backpressure`, which it absorbs with its accept backoff; a connection aborted before it was
+/// taken, or an interrupted call, is passed over and the next one taken at once, as 1.5.5 did.
+/// RED when the accept paths map through `map_io_err`, whose catch-all is `Closed`.
+#[cfg(unix)]
+#[test]
+fn a_live_listeners_accept_error_is_never_closed() {
+    for errno in [libc::EMFILE, libc::ENFILE, libc::ENOBUFS, libc::ENOMEM] {
+        assert_eq!(
+            TcpTransport::accept_err(&io::Error::from_raw_os_error(errno)),
+            Some(TransportError::Backpressure),
+            "errno {errno}: an exhausted resource is backpressure, not the listener's end"
+        );
+    }
+    for errno in [libc::ENOTCONN, libc::EPROTO, libc::EPERM, libc::EINVAL] {
+        let answer = TcpTransport::accept_err(&io::Error::from_raw_os_error(errno));
+        assert!(
+            answer.is_some() && answer != Some(TransportError::Closed),
+            "errno {errno} answers {answer:?}"
+        );
+    }
+    for kind in [io::ErrorKind::ConnectionAborted, io::ErrorKind::Interrupted] {
+        assert_eq!(
+            TcpTransport::accept_err(&io::Error::new(kind, "fixture")),
+            None,
+            "{kind:?} is passed over, not answered"
+        );
+    }
+    assert_eq!(
+        TcpTransport::accept_err(&io::Error::new(io::ErrorKind::ConnectionReset, "fixture")),
+        Some(TransportError::Reset)
+    );
+}
+
 #[tokio::test]
 async fn backpressure_bounds_the_per_unit_frame_buffer() {
     let (server, listener, client) = bound_pair().await;
