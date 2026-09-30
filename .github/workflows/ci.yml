@@ -21,4 +21,7 @@ jobs:
       busbar_checkout: false
       macos_test: "cargo test --workspace --locked"
       extra_test: ""
+      plugin_crate: busbar-transport-tcp-plugin
+      plugin_kind: transport
+      plugin_alias: tcp
     secrets: inherit

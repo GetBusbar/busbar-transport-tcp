@@ -9,3 +9,27 @@ First-party signed kind:transport plugin cdylib: the tcp transport, packaged as 
 
 [![ci](https://github.com/GetBusbar/busbar-transport-tcp/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/GetBusbar/busbar-transport-tcp/actions/workflows/ci.yml)
 <!-- fleet:header:end -->
+
+## What it is for
+
+`busbar-transport-tcp` is a `kind: transport` busbar plugin.
+
+## Config
+
+Configured under the `tcp` module name.
+
+## Build
+
+```bash
+cargo build --release -p busbar-transport-tcp-plugin
+```
+
+## Tests
+
+```bash
+cargo test --workspace --locked
+```
+
+## License
+
+Apache-2.0. See [LICENSE](LICENSE).
