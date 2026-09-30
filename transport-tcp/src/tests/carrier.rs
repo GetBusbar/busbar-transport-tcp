@@ -246,3 +246,65 @@ fn a_dialled_connection_arrived_on_no_local_port() {
         "an accepted connection arrived on the listener's port"
     );
 }
+
+/// A read error on a carrier connection ends it the way a close does: it is deregistered and
+/// finalised (TCP-10), the carrier's twin of `a_read_error_deregisters_the_connection`. The peer
+/// closes with bytes it never read, so its stack answers with an RST and the read is an error.
+#[test]
+fn a_read_error_on_a_carrier_connection_deregisters_it() {
+    let carrier = TcpCarrier::new();
+    let (peer, conn) = accepted(&carrier);
+    let _written = wait(|cx| carrier.poll_write(conn, cx, &[7_u8; 4096])).expect("write");
+    wait(|cx| carrier.poll_flush(conn, cx)).expect("flush");
+    // Peeked, not read: the bytes have arrived and are still unread when the peer closes.
+    peer.peek(&mut [0_u8; 1]).expect("the bytes arrive");
+    drop(peer);
+    let mut buf = [0_u8; 64];
+    let read = wait(|cx| carrier.poll_read(conn, cx, &mut buf));
+    assert!(
+        read.is_err(),
+        "a reset connection's read is an error: {read:?}"
+    );
+    assert!(
+        carrier.tcp.inner(conn).is_none(),
+        "a read error deregisters the connection"
+    );
+}
+
+/// A close wakes the read and the write parked on the connection, and each then sees it closed
+/// (TCP-11): the contract's "wakes a read or write parked on it". The close runs on another thread,
+/// as the host's does.
+#[test]
+fn a_close_wakes_the_read_and_the_write_parked_on_the_connection() {
+    let carrier = TcpCarrier::new();
+    let (_peer, conn) = accepted(&carrier);
+    let reader = Arc::new(Count::default());
+    let writer = Arc::new(Count::default());
+    let reading = Waker::from(Arc::clone(&reader));
+    let writing = Waker::from(Arc::clone(&writer));
+    let mut buf = [0_u8; 16];
+    let read = carrier.poll_read(conn, &mut Context::from_waker(&reading), &mut buf);
+    assert!(read.is_pending(), "nothing has been sent: {read:?}");
+    // The peer never reads, so the send buffers fill and the write parks.
+    let chunk = vec![0_u8; 64 * 1024];
+    let parked = (0..100_000).any(|_| {
+        carrier
+            .poll_write(conn, &mut Context::from_waker(&writing), &chunk)
+            .is_pending()
+    });
+    assert!(parked, "the write parks on a peer that never reads");
+
+    std::thread::scope(|s| {
+        s.spawn(|| wait(|cx| carrier.poll_close(conn, cx, CloseReason::Normal)))
+            .join()
+            .expect("the closing thread")
+            .expect("close");
+    });
+    assert!(reader.woken() > 0, "the close woke the parked read");
+    assert!(writer.woken() > 0, "the close woke the parked write");
+    let read = carrier.poll_read(conn, &mut Context::from_waker(&reading), &mut buf);
+    assert!(
+        matches!(read, Poll::Ready(Err(TransportError::Closed) | Ok(0))),
+        "the woken read sees the connection closed: {read:?}"
+    );
+}
