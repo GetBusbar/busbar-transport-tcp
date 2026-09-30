@@ -200,7 +200,28 @@ impl TcpCarrier {
         drop(dialing);
         #[cfg(test)]
         Hooks::run(&self.hooks.dial_settled, self);
+        // The dial kept only the waker of the poll that settled it: every other direction that
+        // parked on it waits for this, whatever the outcome.
+        self.wake_others(conn, cx);
         Poll::Ready(settled)
+    }
+
+    /// Wake every waker parked on `conn` other than `cx`'s.
+    fn wake_others(&self, conn: u64, cx: &Context<'_>) {
+        let (reading, writing) = match self
+            .wakers
+            .lock()
+            .expect("waker registry poisoned")
+            .get(&conn)
+        {
+            Some(parked) => (parked.reading.clone(), parked.writing.clone()),
+            None => return,
+        };
+        reading
+            .into_iter()
+            .chain(writing)
+            .filter(|w| !w.will_wake(cx.waker()))
+            .for_each(Waker::wake);
     }
 
     /// Poll one direction of `conn` once its dial settled, parking `cx`'s waker on it.
@@ -212,9 +233,14 @@ impl TcpCarrier {
         op: impl FnOnce(&TcpTransport, &mut Context<'_>) -> Poll<Result<T, TransportError>>,
     ) -> Poll<Result<T, TransportError>> {
         let _in = self.reactor.handle.enter();
-        std::task::ready!(self.settle(conn, cx))?;
+        // Parked BEFORE the dial is driven: a dial still opening keeps only the last poller's waker,
+        // so a read and a write both waiting on it must each be found, and woken, when it settles.
         self.park(conn, reading, cx);
-        let polled = op(&self.tcp, cx);
+        let polled = match self.settle(conn, cx) {
+            Poll::Pending => return Poll::Pending,
+            Poll::Ready(Err(refusal)) => Poll::Ready(Err(refusal)),
+            Poll::Ready(Ok(())) => op(&self.tcp, cx),
+        };
         if let Poll::Ready(Err(_)) = polled {
             self.forget_if_gone(conn);
         }

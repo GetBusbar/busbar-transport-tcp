@@ -189,3 +189,36 @@ fn a_failed_dials_refusal_is_answered_until_its_close() {
     assert!(!carrier.dialing.lock().unwrap().contains_key(&conn));
     assert!(!carrier.wakers.lock().unwrap().contains_key(&conn));
 }
+
+/// A read and a flush both waiting on one dial are both woken when it settles (TCP-5). The dial
+/// future keeps only the waker of the last poll, so the read's waker is lost unless the carrier
+/// holds it. RED when a poll on an opening dial returns `Pending` without parking its waker: the
+/// read waits forever on a dial that has long since settled.
+#[test]
+fn every_direction_waiting_on_a_dial_is_woken_when_it_settles() {
+    let carrier = TcpCarrier {
+        tcp: TcpTransport::new().with_dial_timeout(Duration::from_millis(500)),
+        ..TcpCarrier::new()
+    };
+    // TEST-NET-1 (RFC 5737) is routed nowhere: the dial stays opening until its timeout settles it.
+    let conn = carrier
+        .dial(&Dest::Authority("192.0.2.1:80"))
+        .expect("dial");
+    let reader = Arc::new(Count::default());
+    let mut buf = [0_u8; 16];
+    let read = carrier.poll_read(
+        conn,
+        &mut Context::from_waker(&Waker::from(Arc::clone(&reader))),
+        &mut buf,
+    );
+    assert!(read.is_pending(), "the dial is still opening: {read:?}");
+    // The flush drives the same dial with its own waker, which the dial now keeps instead.
+    assert_eq!(
+        wait(|cx| carrier.poll_flush(conn, cx)),
+        Err(TransportError::Timeout)
+    );
+    assert!(
+        reader.woken() > 0,
+        "the read parked on the dial was never woken when it settled"
+    );
+}
