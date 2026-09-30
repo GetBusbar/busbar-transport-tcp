@@ -106,3 +106,27 @@ fn a_read_that_parks_while_the_close_runs_is_woken() {
         "a read that parked while the close ran was never woken: {polled:?}"
     );
 }
+
+/// A poll on a connection that is gone leaves no waker behind (TCP-4). The poll parks before it
+/// learns the connection is closed, and the entry it made held the caller's waker until a second
+/// close; a host that closes once, as the contract asks, leaked one per closed connection. RED when
+/// the entry outlives the poll that answered `Closed`.
+#[test]
+fn a_poll_on_a_closed_connection_leaves_no_waker_parked() {
+    let carrier = TcpCarrier::new();
+    let (_peer, conn) = accepted(&carrier);
+    wait(|cx| carrier.poll_close(conn, cx, CloseReason::Normal)).expect("close");
+    let mut buf = [0_u8; 16];
+    assert_eq!(
+        wait(|cx| carrier.poll_read(conn, cx, &mut buf)),
+        Err(TransportError::Closed)
+    );
+    assert_eq!(
+        wait(|cx| carrier.poll_write(conn, cx, b"x")),
+        Err(TransportError::Closed)
+    );
+    assert!(
+        !carrier.wakers.lock().unwrap().contains_key(&conn),
+        "a closed connection's poll left its waker parked"
+    );
+}

@@ -190,7 +190,28 @@ impl TcpCarrier {
         let _in = self.reactor.handle.enter();
         std::task::ready!(self.settle(conn, cx))?;
         self.park(conn, reading, cx);
-        op(&self.tcp, cx)
+        let polled = op(&self.tcp, cx);
+        if let Poll::Ready(Err(_)) = polled {
+            self.forget_if_gone(conn);
+        }
+        polled
+    }
+
+    /// Forget the wakers parked on `conn` once it is neither open nor still opening: a poll on a
+    /// closed, reset or unknown connection parks before it finds that out, and the entry it made
+    /// would pin the caller's waker until a close that may never come. Connection ids are never
+    /// reused, so nothing live is forgotten.
+    fn forget_if_gone(&self, conn: u64) {
+        // Asked under the dial registry's lock, so a dial settling into a registered connection is
+        // seen as one or the other, never as neither.
+        let dialing = self.dialing.lock().expect("dial registry poisoned");
+        if dialing.contains_key(&conn) || self.tcp.inner(conn).is_some() {
+            return;
+        }
+        self.wakers
+            .lock()
+            .expect("waker registry poisoned")
+            .remove(&conn);
     }
 }
 
