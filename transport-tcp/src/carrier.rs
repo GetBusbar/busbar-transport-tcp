@@ -218,11 +218,11 @@ impl Carrier for TcpCarrier {
                     Some(err) => return Poll::Ready(Err(err)),
                 },
             };
-            let conn = self
-                .tcp
-                .register(stream, peer)
-                .map_err(|e| TcpTransport::map_io_err(&e))?;
-            return Poll::Ready(Ok((conn.id(), conn.peer())));
+            // A peer gone between its accept and its registration ends that connection, not the
+            // listener: it is dropped and the next one taken.
+            if let Ok(conn) = self.tcp.register(stream, peer) {
+                return Poll::Ready(Ok((conn.id(), conn.peer())));
+            }
         }
         // A run of connections each gone before it was taken: yield, and be polled again at once.
         cx.waker().wake_by_ref();
@@ -291,6 +291,10 @@ impl Carrier for TcpCarrier {
         Some(CarrierFacts { peer, local_port })
     }
 }
+
+#[cfg(test)]
+#[path = "tests/carrier.rs"]
+mod tests;
 
 /// The dropped-in door, compiled only into the dropped-in build (feature `dropped-in`): [`TcpCarrier`]
 /// lowered to the HOT decl and registered as this image's ONE door through the contract's

@@ -155,6 +155,10 @@ pub struct TcpTransport {
     /// How long a `dial` waits for the TCP handshake before giving the socket up;
     /// [`DIAL_TIMEOUT`] unless a caller — or a battery cell — said otherwise.
     dial_timeout: Duration,
+    /// How many of the next registrations fail the way one does for a peer that reset between its
+    /// accept and its registration: the fault the accept paths must pass over.
+    #[cfg(test)]
+    register_faults: std::sync::atomic::AtomicUsize,
 }
 
 impl Default for TcpTransport {
@@ -178,6 +182,8 @@ impl TcpTransport {
             conns: Arc::new(Mutex::new(HashMap::new())),
             listeners: Mutex::new(HashMap::new()),
             dial_timeout: DIAL_TIMEOUT,
+            #[cfg(test)]
+            register_faults: std::sync::atomic::AtomicUsize::new(0),
         }
     }
 
@@ -201,6 +207,14 @@ impl TcpTransport {
 
     /// [`Self::register`], under an identity [`Self::next_conn_id`] already minted.
     fn register_as(&self, id: u64, stream: TcpStream, peer: SocketAddr) -> io::Result<Conn> {
+        #[cfg(test)]
+        if self
+            .register_faults
+            .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_sub(1))
+            .is_ok()
+        {
+            return Err(io::Error::from(io::ErrorKind::NotConnected));
+        }
         stream.set_nodelay(true)?;
         let local_port = stream.local_addr()?.port();
         let (read, write) = stream.into_split();
@@ -261,9 +275,12 @@ impl TcpTransport {
                         Some(err) => return Err(err),
                     },
                 };
-                return self
-                    .register(stream, peer)
-                    .map_err(|e| Self::map_io_err(&e));
+                // A peer that went away between its accept and its registration ends that
+                // connection, not the listener: it is dropped and the next one taken, as 1.5.5
+                // served on past a socket option it could not set.
+                if let Ok(conn) = self.register(stream, peer) {
+                    return Ok(conn);
+                }
             }
             tokio::task::yield_now().await;
         }

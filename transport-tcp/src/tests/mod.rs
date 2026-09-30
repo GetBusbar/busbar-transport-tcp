@@ -432,6 +432,29 @@ fn a_live_listeners_accept_error_is_never_closed() {
     );
 }
 
+/// A connection whose registration fails after its accept (its peer reset in between, so the
+/// socket options cannot be set) is that connection's end, not the listener's: `accept` drops it and
+/// answers the next one (TCP-2). RED when the registration error is answered as the accept's, which
+/// for `NotConnected` is `Closed` and ends the host's accept loop.
+#[tokio::test]
+async fn a_connection_that_cannot_be_registered_is_passed_over() {
+    let (server, listener, _client) = bound_pair().await;
+    let addr = listener.local_addr();
+    let _gone = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    let _next = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    server.register_faults.store(1, Ordering::Relaxed);
+    let conn = tokio::time::timeout(Duration::from_secs(5), server.accept(&listener))
+        .await
+        .expect("the accept answers")
+        .expect("the listener passes over the dead connection and takes the next");
+    assert_eq!(
+        server.register_faults.load(Ordering::Relaxed),
+        0,
+        "the first registration failed"
+    );
+    assert!(server.inner(conn.id()).is_some());
+}
+
 #[tokio::test]
 async fn backpressure_bounds_the_per_unit_frame_buffer() {
     let (server, listener, client) = bound_pair().await;
