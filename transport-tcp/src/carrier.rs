@@ -39,7 +39,32 @@ pub struct TcpCarrier {
     listeners: Mutex<HashMap<u64, Arc<tokio::net::TcpListener>>>,
     next_listener: AtomicU64,
     dialing: Mutex<HashMap<u64, Dialing>>,
+    #[cfg(test)]
+    hooks: Hooks,
     reactor: Reactor,
+}
+
+/// A step a test runs at one point inside the carrier.
+#[cfg(test)]
+type Hook = Mutex<Option<Box<dyn FnOnce(&TcpCarrier) + Send>>>;
+
+/// The points inside the carrier where a second thread's call could land mid-operation, so a test
+/// replays that race deterministically on one thread.
+#[cfg(test)]
+#[derive(Default)]
+struct Hooks {
+    /// Inside `poll_close`, between its closing the connection and its draining the parked wakers.
+    mid_close: Hook,
+}
+
+#[cfg(test)]
+impl Hooks {
+    fn run(hook: &Hook, carrier: &TcpCarrier) {
+        let step = hook.lock().expect("hook poisoned").take();
+        if let Some(step) = step {
+            step(carrier);
+        }
+    }
 }
 
 impl std::fmt::Debug for TcpCarrier {
@@ -116,6 +141,8 @@ impl TcpCarrier {
             listeners: Mutex::new(HashMap::new()),
             next_listener: AtomicU64::new(1),
             dialing: Mutex::new(HashMap::new()),
+            #[cfg(test)]
+            hooks: Hooks::default(),
             reactor: Reactor::start().expect("the tcp carrier's reactor thread starts"),
         }
     }
@@ -268,14 +295,20 @@ impl Carrier for TcpCarrier {
                 .expect("dial registry poisoned")
                 .remove(&conn),
         );
+        if let Some(handle) = self.tcp.conn_handle(conn) {
+            self.tcp.close(handle, reason);
+        }
+        #[cfg(test)]
+        Hooks::run(&self.hooks.mid_close, self);
+        // Drained only once the connection is closed: a poll that parked before this point is woken
+        // here, and one that parks after it finds the connection gone and answers `Closed`. Drained
+        // first, a poll that parked in between saw the connection still open, answered `Pending`,
+        // and was never woken.
         let parked = self
             .wakers
             .lock()
             .expect("waker registry poisoned")
             .remove(&conn);
-        if let Some(handle) = self.tcp.conn_handle(conn) {
-            self.tcp.close(handle, reason);
-        }
         if let Some(parked) = parked {
             parked
                 .reading

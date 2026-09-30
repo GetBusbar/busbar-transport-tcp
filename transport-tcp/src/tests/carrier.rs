@@ -4,6 +4,7 @@
 //! could.
 
 use super::*;
+use std::sync::atomic::AtomicUsize;
 use std::task::Wake;
 use std::time::{Duration, Instant};
 
@@ -30,6 +31,30 @@ fn wait<T>(mut poll: impl FnMut(&mut Context<'_>) -> Poll<T>) -> T {
     }
 }
 
+/// A waker that counts how often it was woken.
+#[derive(Default)]
+struct Count(AtomicUsize);
+
+impl Wake for Count {
+    fn wake(self: Arc<Self>) {
+        self.0.fetch_add(1, Ordering::SeqCst);
+    }
+}
+
+impl Count {
+    fn woken(&self) -> usize {
+        self.0.load(Ordering::SeqCst)
+    }
+}
+
+/// A carrier listening on loopback, a raw peer connected to it, and the accepted connection.
+fn accepted(carrier: &TcpCarrier) -> (std::net::TcpStream, u64) {
+    let (listener, addr) = carrier.listen("127.0.0.1:0").expect("listen");
+    let peer = std::net::TcpStream::connect(addr.as_str()).expect("connect");
+    let (conn, _) = wait(|cx| carrier.poll_accept(listener, cx)).expect("accept");
+    (peer, conn)
+}
+
 /// An accepted connection whose registration fails (its peer reset between the accept and the
 /// registration) is passed over and the next one answered (TCP-2). RED when the registration's
 /// `NotConnected` is answered as the accept's error: `Closed`, which ends the host's accept loop.
@@ -48,4 +73,36 @@ fn an_accepted_connection_that_cannot_be_registered_is_passed_over() {
         "the first registration failed"
     );
     assert!(carrier.tcp.inner(conn).is_some());
+}
+
+/// A read that parks while a close runs on another thread is woken by that close (TCP-3). The hook
+/// runs the read at the one point inside `poll_close` a second thread's read could land. RED when
+/// the parked wakers are drained before the connection is closed: the read parks after the drain,
+/// finds the connection still open, answers `Pending`, and nothing ever wakes it.
+#[test]
+fn a_read_that_parks_while_the_close_runs_is_woken() {
+    let carrier = TcpCarrier::new();
+    let (_peer, conn) = accepted(&carrier);
+    let reader = Arc::new(Count::default());
+    let answered = Arc::new(Mutex::new(None));
+    *carrier.hooks.mid_close.lock().unwrap() = Some(Box::new({
+        let reader = Arc::clone(&reader);
+        let answered = Arc::clone(&answered);
+        move |c: &TcpCarrier| {
+            let waker = Waker::from(reader);
+            let mut buf = [0_u8; 16];
+            let polled = c.poll_read(conn, &mut Context::from_waker(&waker), &mut buf);
+            *answered.lock().unwrap() = Some(polled);
+        }
+    }));
+    wait(|cx| carrier.poll_close(conn, cx, CloseReason::Normal)).expect("close");
+    let polled = answered
+        .lock()
+        .unwrap()
+        .take()
+        .expect("the read ran inside the close");
+    assert!(
+        polled.is_ready() || reader.woken() > 0,
+        "a read that parked while the close ran was never woken: {polled:?}"
+    );
 }
