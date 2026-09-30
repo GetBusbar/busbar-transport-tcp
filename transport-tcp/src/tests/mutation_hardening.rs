@@ -107,3 +107,11 @@ async fn detach_on_an_idle_connection_hands_the_stream_up() {
     assert_eq!(raw.from(), "tcp");
     assert_eq!(raw.peer(), expected_peer);
 }
+
+/// `DIAL_TIMEOUT` is ten seconds (TCP-19). The carrier always dials on the default and the timeout
+/// cell overrides it, so a mutant that makes it `1ms` or `1000s` survives everywhere else. Pin the
+/// value itself.
+#[test]
+fn dial_timeout_is_ten_seconds() {
+    assert_eq!(DIAL_TIMEOUT, Duration::from_secs(10));
+}
