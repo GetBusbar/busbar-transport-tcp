@@ -222,3 +222,27 @@ fn every_direction_waiting_on_a_dial_is_woken_when_it_settles() {
         "the read parked on the dial was never woken when it settled"
     );
 }
+
+/// A dialled connection's facts name no local port (TCP-8): `CarrierFacts.local_port` is "`0` on one
+/// that was dialled". An accepted one names the port it arrived on. RED when the dialled connection
+/// reports its ephemeral port.
+#[test]
+fn a_dialled_connection_arrived_on_no_local_port() {
+    let carrier = TcpCarrier::new();
+    let (listener, addr) = carrier.listen("127.0.0.1:0").expect("listen");
+    let conn = carrier.dial(&Dest::Authority(&addr)).expect("dial");
+    wait(|cx| carrier.poll_flush(conn, cx)).expect("the dial opens");
+    let (accepted, _) = wait(|cx| carrier.poll_accept(listener, cx)).expect("accept");
+    let dialled = carrier.arrival(conn).expect("dialled facts");
+    assert_eq!(
+        dialled.local_port, 0,
+        "a dialled connection arrived on no port"
+    );
+    assert_eq!(dialled.peer, addr);
+    let listen_port: u16 = addr.rsplit(':').next().unwrap().parse().unwrap();
+    let accepted = carrier.arrival(accepted).expect("accepted facts");
+    assert_eq!(
+        accepted.local_port, listen_port,
+        "an accepted connection arrived on the listener's port"
+    );
+}

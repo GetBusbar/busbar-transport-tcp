@@ -455,6 +455,21 @@ async fn a_connection_that_cannot_be_registered_is_passed_over() {
     assert!(server.inner(conn.id()).is_some());
 }
 
+/// A connection the `Transport` trait dialled arrived on no local port (TCP-8): its arrival names
+/// port `0`, as the carrier's facts do, not its ephemeral port. RED when it reports the ephemeral
+/// port.
+#[tokio::test]
+async fn a_dialled_connections_arrival_names_no_local_port() {
+    let (server, listener, client) = bound_pair().await;
+    let addr = listener.local_addr();
+    let client_conn = client
+        .dial(&upstream_dest(&addr), &fixture_key())
+        .await
+        .unwrap();
+    let _server_conn = server.accept(&listener).await.unwrap();
+    assert_eq!(client.arrival(&client_conn).port, 0);
+}
+
 #[tokio::test]
 async fn backpressure_bounds_the_per_unit_frame_buffer() {
     let (server, listener, client) = bound_pair().await;

@@ -189,7 +189,7 @@ impl TcpCarrier {
         // socket was registered under a handle its owner had already closed.
         let settled = opened.and_then(|(stream, addr)| {
             self.tcp
-                .register_as(conn, stream, addr)
+                .register_as(conn, stream, addr, true)
                 .map(drop)
                 .map_err(|e| TcpTransport::map_io_err(&e))
         });

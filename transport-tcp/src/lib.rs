@@ -195,8 +195,9 @@ impl TcpTransport {
         self
     }
 
+    /// Register a connection this transport accepted.
     fn register(&self, stream: TcpStream, peer: SocketAddr) -> io::Result<Conn> {
-        self.register_as(self.next_conn_id(), stream, peer)
+        self.register_as(self.next_conn_id(), stream, peer, false)
     }
 
     /// A connection identity no connection of this transport holds — for a connection whose handle
@@ -205,8 +206,15 @@ impl TcpTransport {
         self.next_id.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// [`Self::register`], under an identity [`Self::next_conn_id`] already minted.
-    fn register_as(&self, id: u64, stream: TcpStream, peer: SocketAddr) -> io::Result<Conn> {
+    /// [`Self::register`], under an identity [`Self::next_conn_id`] already minted, for a connection
+    /// accepted or, when `dialled`, dialled.
+    fn register_as(
+        &self,
+        id: u64,
+        stream: TcpStream,
+        peer: SocketAddr,
+        dialled: bool,
+    ) -> io::Result<Conn> {
         #[cfg(test)]
         if self
             .register_faults
@@ -216,7 +224,13 @@ impl TcpTransport {
             return Err(io::Error::from(io::ErrorKind::NotConnected));
         }
         stream.set_nodelay(true)?;
-        let local_port = stream.local_addr()?.port();
+        // The local port the connection arrived on. A dialled one arrived on none: its ephemeral
+        // port is not an arrival, and the contract's facts say `0` for it.
+        let local_port = if dialled {
+            0
+        } else {
+            stream.local_addr()?.port()
+        };
         let (read, write) = stream.into_split();
         let inner = Arc::new(Inner {
             peer,
@@ -290,7 +304,7 @@ impl TcpTransport {
     /// read down to its authority, for either door.
     async fn dial_authority(&self, authority: &str) -> Result<Conn, TransportError> {
         let (stream, addr) = self.dialing(authority)?.await?;
-        self.register(stream, addr)
+        self.register_as(self.next_conn_id(), stream, addr, true)
             .map_err(|e| Self::map_io_err(&e))
     }
 
