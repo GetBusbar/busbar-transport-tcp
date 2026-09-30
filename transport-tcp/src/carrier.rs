@@ -243,7 +243,7 @@ impl TcpCarrier {
             Poll::Ready(Ok(())) => op(&self.tcp, cx),
         };
         if let Poll::Ready(Err(_)) = polled {
-            self.forget_if_gone(conn);
+            self.forget_if_gone(conn, cx);
         }
         polled
     }
@@ -251,8 +251,11 @@ impl TcpCarrier {
     /// Forget the wakers parked on `conn` once it is neither open nor still opening: a poll on a
     /// closed, reset or unknown connection parks before it finds that out, and the entry it made
     /// would pin the caller's waker until a close that may never come. Connection ids are never
-    /// reused, so nothing live is forgotten.
-    fn forget_if_gone(&self, conn: u64) {
+    /// reused, so nothing live is forgotten. The other direction's waker, if one is parked, is woken
+    /// as it is forgotten, so it polls again and sees the connection gone: a read error deregisters
+    /// the connection, and dropping the socket's registration clears the waker the reactor held for
+    /// a parked write without waking it, so this is the one wake that write gets.
+    fn forget_if_gone(&self, conn: u64, cx: &Context<'_>) {
         // Asked under the dial registry's lock, so a dial settling into a registered connection is
         // seen as one or the other, never as neither.
         let dialing = self.dialing.lock().expect("dial registry poisoned");
@@ -260,10 +263,20 @@ impl TcpCarrier {
         if opening || self.tcp.inner(conn).is_some() {
             return;
         }
-        self.wakers
+        let parked = self
+            .wakers
             .lock()
             .expect("waker registry poisoned")
             .remove(&conn);
+        drop(dialing);
+        if let Some(parked) = parked {
+            parked
+                .reading
+                .into_iter()
+                .chain(parked.writing)
+                .filter(|w| !w.will_wake(cx.waker()))
+                .for_each(Waker::wake);
+        }
     }
 }
 

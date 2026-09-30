@@ -131,6 +131,44 @@ fn a_poll_on_a_closed_connection_leaves_no_waker_parked() {
     );
 }
 
+/// A write parked on a connection whose read then fails is woken when the read forgets the
+/// connection's wakers (TCP-4's follow-up). The read error deregisters the connection, and the
+/// socket's registration drops the waker the reactor held for the write without waking it, so the
+/// carrier's parked entry is the write's one way back. The write is parked in the carrier's
+/// registry alone, as it stands once that registration is gone, so no readiness event can wake it
+/// and the cell is deterministic. RED when the gone connection's entry is removed without waking
+/// the other direction: the write is never woken.
+#[test]
+fn a_read_error_wakes_the_write_parked_on_the_connection() {
+    let carrier = TcpCarrier::new();
+    let (peer, conn) = accepted(&carrier);
+    let _written = wait(|cx| carrier.poll_write(conn, cx, &[7_u8; 4096])).expect("write");
+    wait(|cx| carrier.poll_flush(conn, cx)).expect("flush");
+    let writer = Arc::new(Count::default());
+    carrier.park(
+        conn,
+        false,
+        &Context::from_waker(&Waker::from(Arc::clone(&writer))),
+    );
+    // Peeked, not read: the peer closes with bytes it never read, so its stack answers with an RST.
+    peer.peek(&mut [0_u8; 1]).expect("the bytes arrive");
+    drop(peer);
+    let mut buf = [0_u8; 64];
+    let read = wait(|cx| carrier.poll_read(conn, cx, &mut buf));
+    assert!(
+        read.is_err(),
+        "a reset connection's read is an error: {read:?}"
+    );
+    assert!(
+        writer.woken() > 0,
+        "the write parked on the connection was never woken by the read that ended it"
+    );
+    assert!(
+        !carrier.wakers.lock().unwrap().contains_key(&conn),
+        "the gone connection's wakers are forgotten"
+    );
+}
+
 /// A close that lands while a dial settles leaves nothing registered (TCP-6). The hook runs the close
 /// at the point inside `settle` a second thread's close could land, once the dial's entry is gone.
 /// RED when the entry is forgotten before the socket is registered: the close finds neither the dial
