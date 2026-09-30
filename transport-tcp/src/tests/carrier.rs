@@ -156,3 +156,36 @@ fn a_close_while_the_dial_settles_leaves_nothing_registered() {
     );
     assert_eq!(flushed, Err(TransportError::Closed));
 }
+
+/// A dial's refusal is answered by every poll on it until its close, whichever poll settled it
+/// (TCP-7): the contract names `poll_flush` as where the refusal is answered. RED when the failed
+/// dial is forgotten by the poll that settled it: a `poll_read` takes the refusal and the
+/// `poll_flush` after it answers `Closed`.
+#[test]
+fn a_failed_dials_refusal_is_answered_until_its_close() {
+    let carrier = TcpCarrier::new();
+    // A reserved port nobody may bind unprivileged: the conformance fold's refused dial.
+    let conn = carrier.dial(&Dest::Authority("127.0.0.1:1")).expect("dial");
+    let mut buf = [0_u8; 16];
+    assert_eq!(
+        wait(|cx| carrier.poll_read(conn, cx, &mut buf)),
+        Err(TransportError::Refused)
+    );
+    assert_eq!(
+        wait(|cx| carrier.poll_flush(conn, cx)),
+        Err(TransportError::Refused),
+        "the flush after the read still answers the dial's refusal"
+    );
+    assert_eq!(
+        wait(|cx| carrier.poll_write(conn, cx, b"x")),
+        Err(TransportError::Refused)
+    );
+    wait(|cx| carrier.poll_close(conn, cx, CloseReason::Normal)).expect("close");
+    assert_eq!(
+        wait(|cx| carrier.poll_flush(conn, cx)),
+        Err(TransportError::Closed),
+        "the close forgets the refusal"
+    );
+    assert!(!carrier.dialing.lock().unwrap().contains_key(&conn));
+    assert!(!carrier.wakers.lock().unwrap().contains_key(&conn));
+}

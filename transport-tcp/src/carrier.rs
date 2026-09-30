@@ -38,7 +38,7 @@ pub struct TcpCarrier {
     wakers: Mutex<HashMap<u64, Parked>>,
     listeners: Mutex<HashMap<u64, Arc<tokio::net::TcpListener>>>,
     next_listener: AtomicU64,
-    dialing: Mutex<HashMap<u64, Dialing>>,
+    dialing: Mutex<HashMap<u64, Dial>>,
     #[cfg(test)]
     hooks: Hooks,
     reactor: Reactor,
@@ -78,6 +78,13 @@ impl std::fmt::Debug for TcpCarrier {
 /// A dial `dial` began: its connection's handle is out, its socket not yet open.
 type Dialing =
     Pin<Box<dyn Future<Output = Result<(TcpStream, SocketAddr), TransportError>> + Send>>;
+
+/// A dial whose connection is not (yet) registered: still opening, or failed with the refusal every
+/// poll on it answers until it is closed.
+enum Dial {
+    Opening(Dialing),
+    Failed(TransportError),
+}
 
 /// The wakers a connection's parked reading and writing hold — so a close wakes both, and each sees
 /// the connection closed.
@@ -165,11 +172,15 @@ impl TcpCarrier {
     }
 
     /// Drive the dial `dial` began for `conn`, if it is still opening: the connection is held once
-    /// its socket is open, and forgotten if the dial failed.
+    /// its socket is open, and a failed dial kept as its refusal until the connection is closed.
     fn settle(&self, conn: u64, cx: &mut Context<'_>) -> Poll<Result<(), TransportError>> {
         let mut dialing = self.dialing.lock().expect("dial registry poisoned");
-        let Some(dial) = dialing.get_mut(&conn) else {
-            return Poll::Ready(Ok(()));
+        let dial = match dialing.get_mut(&conn) {
+            None => return Poll::Ready(Ok(())),
+            // A failed dial answers its refusal to every poll until it is closed, not only to the
+            // poll that happened to settle it: the contract answers it under `poll_flush`.
+            Some(Dial::Failed(refusal)) => return Poll::Ready(Err(*refusal)),
+            Some(Dial::Opening(dial)) => dial,
         };
         let opened = std::task::ready!(dial.as_mut().poll(cx));
         // Registered while the dial registry is still held, and only then is the dial forgotten: a
@@ -182,7 +193,10 @@ impl TcpCarrier {
                 .map(drop)
                 .map_err(|e| TcpTransport::map_io_err(&e))
         });
-        dialing.remove(&conn);
+        match settled {
+            Ok(()) => drop(dialing.remove(&conn)),
+            Err(refusal) => drop(dialing.insert(conn, Dial::Failed(refusal))),
+        }
         drop(dialing);
         #[cfg(test)]
         Hooks::run(&self.hooks.dial_settled, self);
@@ -215,7 +229,8 @@ impl TcpCarrier {
         // Asked under the dial registry's lock, so a dial settling into a registered connection is
         // seen as one or the other, never as neither.
         let dialing = self.dialing.lock().expect("dial registry poisoned");
-        if dialing.contains_key(&conn) || self.tcp.inner(conn).is_some() {
+        let opening = matches!(dialing.get(&conn), Some(Dial::Opening(_)));
+        if opening || self.tcp.inner(conn).is_some() {
             return;
         }
         self.wakers
@@ -298,7 +313,7 @@ impl Carrier for TcpCarrier {
         self.dialing
             .lock()
             .expect("dial registry poisoned")
-            .insert(id, Box::pin(dial));
+            .insert(id, Dial::Opening(Box::pin(dial)));
         Ok(id)
     }
 
@@ -317,7 +332,8 @@ impl Carrier for TcpCarrier {
     }
 
     /// Forget the connection and close it the way the transport closes one, waking whatever was
-    /// parked on it; a dial still opening is dropped where it stood. Idempotent.
+    /// parked on it; a dial still opening is dropped where it stood, and a failed one's refusal
+    /// forgotten. Idempotent.
     fn poll_close(&self, conn: u64, _cx: &mut Context<'_>, reason: CloseReason) -> CarrierPoll<()> {
         let _in = self.reactor.handle.enter();
         drop(
