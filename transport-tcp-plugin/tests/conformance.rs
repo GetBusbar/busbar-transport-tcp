@@ -98,13 +98,15 @@ fn read_exact(c: &dyn Carrier, conn: u64, n: usize, chunk: usize) -> Vec<u8> {
     all
 }
 
-/// Read `conn` to its clean end (or its error), in reads no longer than `chunk`.
-fn drain(c: &dyn Carrier, conn: u64, chunk: usize) -> Vec<u8> {
+/// Read `conn` to its end, in reads no longer than `chunk`: the bytes, and how it ended (`Ok` for
+/// the clean end, or the error that ended it).
+fn drain(c: &dyn Carrier, conn: u64, chunk: usize) -> (Vec<u8>, Result<(), TransportError>) {
     let mut all = Vec::new();
     let mut buf = vec![0_u8; chunk];
     loop {
         match wait(|cx| c.poll_read(conn, cx, &mut buf)) {
-            Ok(0) | Err(_) => return all,
+            Ok(0) => return (all, Ok(())),
+            Err(e) => return (all, Err(e)),
             Ok(n) => all.extend_from_slice(&buf[..n]),
         }
     }
@@ -237,13 +239,18 @@ fn payload(seed: u8, len: usize) -> Vec<u8> {
 #[derive(Debug, PartialEq, Eq)]
 struct Fold {
     key: &'static str,
-    /// Dialled out: what the peer received, and what the carrier read back.
+    /// Dialled out: what the peer received, what the carrier read back and how that read ended,
+    /// and the local port the dialled connection's arrival names.
     dial_peer_saw: Vec<u8>,
     dial_read_back: Vec<u8>,
-    /// Listened: what the carrier read from the peer, what the peer received back, and whether the
-    /// accepted connection's arrival named its far end as the accept did and a local port.
+    dial_end: Result<(), TransportError>,
+    dial_local_port: Option<u16>,
+    /// Listened: what the carrier read from the peer, what the peer received back and how that
+    /// read ended, and whether the accepted connection's arrival named its far end as the accept
+    /// did and the port the carrier listened on.
     accept_read: Vec<u8>,
     accept_peer_saw: Vec<u8>,
+    accept_peer_end: Result<(), TransportError>,
     arrival_agrees: bool,
     /// What an unknown connection answers on write and close, a dial to a port nobody listens on
     /// once it settles, and a program destination.
@@ -271,12 +278,18 @@ fn fold(c: &dyn Carrier) -> Fold {
     });
     let conn = c.dial(&Dest::Authority(&authority)).expect("dial");
     write_all(c, conn, &payload(SENT.0, SENT.1)).expect("write the request");
-    let dial_read_back = drain(c, conn, 1000);
+    let dial_local_port = c.arrival(conn).map(|a| a.local_port);
+    let (dial_read_back, dial_end) = drain(c, conn, 1000);
     wait(|cx| c.poll_close(conn, cx, CloseReason::Normal)).expect("close");
     let dial_peer_saw = far.join().unwrap();
 
     // ── listen, take the peer's bytes, answer, close; the peer reads to the clean end ──
     let (listener, addr) = c.listen("127.0.0.1:0").expect("listen");
+    let listen_port: u16 = addr
+        .rsplit(':')
+        .next()
+        .and_then(|port| port.parse().ok())
+        .expect("listen answers host:port");
     let near = std::thread::spawn(move || {
         let near = peer();
         let conn = near.dial(&Dest::Authority(&addr)).expect("the peer dials");
@@ -287,11 +300,11 @@ fn fold(c: &dyn Carrier) -> Fold {
     let (conn, peer_addr) = wait(|cx| c.poll_accept(listener, cx)).expect("accept");
     assert!(peer_addr.starts_with("127.0.0.1:"), "{peer_addr}");
     let arrival = c.arrival(conn).expect("an accepted connection's arrival");
-    let arrival_agrees = arrival.peer == peer_addr && arrival.local_port != 0;
+    let arrival_agrees = arrival.peer == peer_addr && arrival.local_port == listen_port;
     let accept_read = read_exact(c, conn, SENT.1, 777);
     write_all(c, conn, &payload(REPLY.0 ^ 0xff, REPLY.1)).expect("write the answer");
     wait(|cx| c.poll_close(conn, cx, CloseReason::Normal)).expect("close");
-    let accept_peer_saw = near.join().unwrap();
+    let (accept_peer_saw, accept_peer_end) = near.join().unwrap();
 
     // ── a dial nobody answers is refused when its opening settles ──
     let conn = c
@@ -304,8 +317,11 @@ fn fold(c: &dyn Carrier) -> Fold {
         key: c.key(),
         dial_peer_saw,
         dial_read_back,
+        dial_end,
+        dial_local_port,
         accept_read,
         accept_peer_saw,
+        accept_peer_end,
         arrival_agrees,
         unknown_write: wait(|cx| c.poll_write(u64::MAX, cx, b"x")).unwrap_err(),
         unknown_close: wait(|cx| c.poll_close(u64::MAX, cx, CloseReason::Normal)),
@@ -326,8 +342,11 @@ fn expected() -> Fold {
         key: linked::KEY,
         dial_peer_saw: payload(SENT.0, SENT.1),
         dial_read_back: payload(REPLY.0, REPLY.1),
+        dial_end: Ok(()),
+        dial_local_port: Some(0),
         accept_read: payload(SENT.0 ^ 0xff, SENT.1),
         accept_peer_saw: payload(REPLY.0 ^ 0xff, REPLY.1),
+        accept_peer_end: Ok(()),
         arrival_agrees: true,
         unknown_write: TransportError::Closed,
         unknown_close: Ok(()),
