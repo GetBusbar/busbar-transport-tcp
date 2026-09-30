@@ -343,9 +343,9 @@ impl TcpTransport {
     /// Bind a listener the host may bind once per ACCEPTOR on one address — its per-core fan-out,
     /// every acceptor its own listener, the kernel spreading the connections between them — so on
     /// unix it is SO_REUSEPORT, as the host's own per-core data listeners are. Answers the listener
-    /// and the address it actually bound. What the HOT door's `listen` does; it answers at once, so it
-    /// resolves `bind` without waiting on a resolver, and runs inside the runtime the listener
-    /// registers with.
+    /// and the address it actually bound. What the HOT door's `listen` does, inside the runtime the
+    /// listener registers with. An IP-literal `bind` never waits; a hostname `bind` is resolved
+    /// synchronously, on the calling thread, through the system resolver.
     fn bind_shared(bind: &str) -> Result<(TcpListener, String), TransportError> {
         use std::net::ToSocketAddrs;
         let addr = bind

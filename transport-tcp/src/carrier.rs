@@ -7,8 +7,9 @@
 //! lowers the same type to the HOT decl through the contract's `export_carrier!` ([`exports`]), and
 //! the host drives it through the loader's decl-backed carrier — the same methods, one crossing each.
 //!
-//! No method blocks: `listen` and `dial` answer at once, and the `poll_*` methods answer Ready |
-//! Pending | Error, registering the caller's waker. The sockets' readiness and the dial clock are
+//! No method blocks on the network: `listen` and `dial` answer at once (a `listen` on a hostname
+//! rather than an IP literal resolves it through the system resolver first, synchronously), and the
+//! `poll_*` methods answer Ready | Pending | Error, registering the caller's waker. The sockets' readiness and the dial clock are
 //! driven by this carrier's own I/O reactor (one thread per built instance), which wakes the waker
 //! the caller registered; the caller polls again on its own thread and the bytes move there.
 //!
