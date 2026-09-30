@@ -130,3 +130,29 @@ fn a_poll_on_a_closed_connection_leaves_no_waker_parked() {
         "a closed connection's poll left its waker parked"
     );
 }
+
+/// A close that lands while a dial settles leaves nothing registered (TCP-6). The hook runs the close
+/// at the point inside `settle` a second thread's close could land, once the dial's entry is gone.
+/// RED when the entry is forgotten before the socket is registered: the close finds neither the dial
+/// nor the connection, answers `Ok`, and the socket is registered after it under a closed handle.
+#[test]
+fn a_close_while_the_dial_settles_leaves_nothing_registered() {
+    let carrier = TcpCarrier::new();
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+    let authority = listener.local_addr().expect("addr").to_string();
+    let conn = carrier.dial(&Dest::Authority(&authority)).expect("dial");
+    *carrier.hooks.dial_settled.lock().unwrap() = Some(Box::new(move |c: &TcpCarrier| {
+        let closed = c.poll_close(
+            conn,
+            &mut Context::from_waker(Waker::noop()),
+            CloseReason::Normal,
+        );
+        assert_eq!(closed, Poll::Ready(Ok(())));
+    }));
+    let flushed = wait(|cx| carrier.poll_flush(conn, cx));
+    assert!(
+        carrier.tcp.inner(conn).is_none(),
+        "the dial's socket was registered after its close"
+    );
+    assert_eq!(flushed, Err(TransportError::Closed));
+}

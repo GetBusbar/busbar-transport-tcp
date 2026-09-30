@@ -55,6 +55,8 @@ type Hook = Mutex<Option<Box<dyn FnOnce(&TcpCarrier) + Send>>>;
 struct Hooks {
     /// Inside `poll_close`, between its closing the connection and its draining the parked wakers.
     mid_close: Hook,
+    /// Inside `settle`, once the dial's entry is gone and the dial registry released.
+    dial_settled: Hook,
 }
 
 #[cfg(test)]
@@ -170,13 +172,21 @@ impl TcpCarrier {
             return Poll::Ready(Ok(()));
         };
         let opened = std::task::ready!(dial.as_mut().poll(cx));
+        // Registered while the dial registry is still held, and only then is the dial forgotten: a
+        // close takes that lock first, so it finds either the dial (and drops it) or the registered
+        // connection (and closes it). Forgotten first, a close in between found neither, and the
+        // socket was registered under a handle its owner had already closed.
+        let settled = opened.and_then(|(stream, addr)| {
+            self.tcp
+                .register_as(conn, stream, addr)
+                .map(drop)
+                .map_err(|e| TcpTransport::map_io_err(&e))
+        });
         dialing.remove(&conn);
         drop(dialing);
-        let (stream, addr) = opened?;
-        self.tcp
-            .register_as(conn, stream, addr)
-            .map_err(|e| TcpTransport::map_io_err(&e))?;
-        Poll::Ready(Ok(()))
+        #[cfg(test)]
+        Hooks::run(&self.hooks.dial_settled, self);
+        Poll::Ready(settled)
     }
 
     /// Poll one direction of `conn` once its dial settled, parking `cx`'s waker on it.
