@@ -5,7 +5,7 @@
 use super::*;
 // The `Transport` surface, its meta and its claim forms moved to the kind's own `transport.rs`,
 // `meta.rs` and `claims.rs` (`PLUGIN-TREE.md` §3), so `use super::*` no longer carries them.
-use busbar_contract::transport::wire::{CloseReason, FrameMeta, Listener};
+use busbar_contract::transport::wire::{CloseReason, Direction, FrameMeta, Listener};
 use busbar_contract::{
     ConfigView, Frame, Plugin, ScratchBytes, StreamId, Transport, TransportConfigView,
 };
@@ -94,9 +94,20 @@ async fn byte_exact_round_trip_inbound_and_outbound() {
     assert_eq!(n, payload.len());
 
     let mut frames = server.frames(server_conn);
-    let (_stream, frame) = frames.next().await.unwrap().unwrap();
+    let (stream, frame) = frames.next().await.unwrap().unwrap();
     assert_eq!(frame.bytes.as_slice(), payload);
-    assert_eq!(frame.meta.bytes, payload.len() as u64);
+    // What else the frame says: read off the wire, on the one stream a byte stream has, with no
+    // status or unit count, because `tcp` carries none.
+    assert_eq!(stream, StreamId(0));
+    assert_eq!(frame.stream, StreamId(0));
+    assert_eq!(frame.direction, Direction::Inbound);
+    assert_eq!(
+        frame.meta,
+        FrameMeta {
+            bytes: payload.len() as u64,
+            ..FrameMeta::default()
+        }
+    );
 }
 
 #[tokio::test]
@@ -986,4 +997,229 @@ async fn the_hot_doors_listener_binds_once_per_acceptor_on_one_address() {
         TcpTransport::bind_shared("not an address").err(),
         Some(TransportError::AddressRefused)
     );
+}
+
+/// A refusal blocked on a peer that never reads is interrupted by the close, like the ordinary
+/// write (TCP-12): the refusal shares `raced_write`, and without it a peer that stops reading pins
+/// the very connection the refusal is shedding. Red when the refusal's delivery is not raced.
+#[tokio::test]
+async fn a_refusal_blocked_on_a_nonreading_peer_is_interrupted_by_close() {
+    let (server, listener, _client) = bound_pair().await;
+    let addr = listener.local_addr();
+    let accept_fut = tokio::spawn({
+        let server = server.clone();
+        async move { server.accept(&listener).await.unwrap() }
+    });
+    // A peer that connects and then never reads a single byte.
+    let _peer = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    let server_conn = accept_fut.await.unwrap();
+    let id = server_conn.id();
+
+    // Far more than any socket buffer can hold: the refusal's `write_all` fills it and blocks.
+    let big = vec![0_u8; 64 * 1024 * 1024];
+    let refusal = busbar_contract::unit::Refusal {
+        step: busbar_contract::unit::Step::Arrival,
+        reason: busbar_contract::unit::RefusalReason::CursorBudget,
+        retry_after_secs: None,
+        stream: None,
+        correlates: None,
+    };
+    let refuser = {
+        let server = server.clone();
+        let conn = server_conn.clone();
+        tokio::spawn(async move {
+            server
+                .unit0_refusal(conn, None, &refusal, ScratchBytes::new(&big))
+                .await
+        })
+    };
+    tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    assert!(
+        !refuser.is_finished(),
+        "the refusal is parked on the full send buffer"
+    );
+
+    server.close(server_conn, CloseReason::Normal);
+    let result = tokio::time::timeout(std::time::Duration::from_secs(5), refuser)
+        .await
+        .expect("close must interrupt a refusal blocked on a non-reading peer")
+        .unwrap();
+    assert_eq!(result, Err(TransportError::Closed));
+    assert!(server.inner(id).is_none());
+}
+
+/// An accepted connection's arrival names the peer, the port it arrived on and the one layer it
+/// crossed (TCP-14).
+#[tokio::test]
+async fn an_accepted_connections_arrival_names_its_peer_port_and_layer() {
+    let (server, listener, _client) = bound_pair().await;
+    let addr = listener.local_addr();
+    let accept_fut = tokio::spawn({
+        let server = server.clone();
+        async move { server.accept(&listener).await.unwrap() }
+    });
+    let peer = tokio::net::TcpStream::connect(&addr).await.unwrap();
+    let server_conn = accept_fut.await.unwrap();
+
+    let arrival = server.arrival(&server_conn);
+    assert_eq!(arrival.source, peer.local_addr().unwrap().to_string());
+    assert_eq!(arrival.source, server_conn.peer());
+    assert_eq!(arrival.port, peer.peer_addr().unwrap().port());
+    assert_eq!(arrival.transport_chain, ["tcp"]);
+    assert_eq!(arrival.alpn, None);
+    assert_eq!(arrival.sni, None);
+}
+
+/// An arena that copies into leaked memory: the honest test double for the fixed-size allocator.
+struct LeakArena;
+
+impl busbar_contract::PlaneAlloc for LeakArena {
+    fn alloc_bytes<'a>(
+        &'a self,
+        src: &[u8],
+    ) -> Result<ScratchBytes<'a>, busbar_contract::PlaneAllocBudget> {
+        Ok(ScratchBytes::new(Box::leak(
+            src.to_vec().into_boxed_slice(),
+        )))
+    }
+    fn alloc_str<'a>(&'a self, src: &str) -> Result<&'a str, busbar_contract::PlaneAllocBudget> {
+        Ok(Box::leak(src.to_string().into_boxed_str()))
+    }
+    fn alloc_spans<'a>(
+        &'a self,
+        src: &[(&'a str, busbar_contract::Span)],
+    ) -> Result<&'a [(&'a str, busbar_contract::Span)], busbar_contract::PlaneAllocBudget> {
+        Ok(Box::leak(src.to_vec().into_boxed_slice()))
+    }
+    fn remaining(&self) -> usize {
+        usize::MAX
+    }
+}
+
+/// An arena with no room left.
+struct FullArena;
+
+impl busbar_contract::PlaneAlloc for FullArena {
+    fn alloc_bytes<'a>(
+        &'a self,
+        src: &[u8],
+    ) -> Result<ScratchBytes<'a>, busbar_contract::PlaneAllocBudget> {
+        Err(busbar_contract::PlaneAllocBudget {
+            wanted: src.len(),
+            remaining: 0,
+        })
+    }
+    fn alloc_str<'a>(&'a self, src: &str) -> Result<&'a str, busbar_contract::PlaneAllocBudget> {
+        Err(busbar_contract::PlaneAllocBudget {
+            wanted: src.len(),
+            remaining: 0,
+        })
+    }
+    fn alloc_spans<'a>(
+        &'a self,
+        src: &[(&'a str, busbar_contract::Span)],
+    ) -> Result<&'a [(&'a str, busbar_contract::Span)], busbar_contract::PlaneAllocBudget> {
+        Err(busbar_contract::PlaneAllocBudget {
+            wanted: src.len(),
+            remaining: 0,
+        })
+    }
+    fn remaining(&self) -> usize {
+        0
+    }
+}
+
+/// A byte stream has no envelope: the encoded bytes are the body, verbatim, whatever fields were
+/// named beside it, and an arena with no room is `ScratchExhausted` (TCP-17).
+#[test]
+fn an_envelope_is_the_body_verbatim() {
+    let tcp = TcpTransport::new();
+    let body = b"the body, and nothing else";
+    let fields: &[(&str, &[u8])] = &[("content-type", b"text/plain"), ("x-extra", b"1")];
+    let encoded = tcp
+        .encode_envelope(fields, body, &LeakArena)
+        .expect("the arena has room");
+    assert_eq!(encoded.as_slice(), body);
+    assert_eq!(
+        tcp.encode_envelope(fields, body, &FullArena).err(),
+        Some(busbar_contract::transport::wire::Encode::ScratchExhausted)
+    );
+}
+
+/// Nothing is adopted onto `tcp`: it is the bottom layer, so `adopt` answers `HandoffMismatch`
+/// (TCP-17).
+#[tokio::test]
+async fn nothing_is_adopted_onto_tcp() {
+    struct Ghost;
+    impl ConnHandle for Ghost {
+        fn id(&self) -> u64 {
+            7
+        }
+        fn peer(&self) -> String {
+            "ghost".to_string()
+        }
+    }
+    let tcp = TcpTransport::new();
+    let other = TcpTransport::new();
+    let adopted = tcp
+        .adopt(&other, Conn::new(StdArc::new(Ghost)), &fixture_key())
+        .await;
+    assert_eq!(adopted.err(), Some(TransportError::HandoffMismatch));
+}
+
+/// A `TransportConfigView` that names no bind.
+struct NoBind;
+
+impl ConfigView for NoBind {
+    fn get_str(&self, _key: &str) -> Option<&str> {
+        None
+    }
+    fn get_int(&self, _key: &str) -> Option<i64> {
+        None
+    }
+    fn get_bool(&self, _key: &str) -> Option<bool> {
+        None
+    }
+}
+
+impl TransportConfigView for NoBind {
+    fn bind(&self) -> Option<&str> {
+        None
+    }
+}
+
+/// The listen and accept edges (TCP-18): with no bind, `listen` binds IPv4 loopback; a bind that is
+/// not an address is `AddressRefused`; an accept on a listener this transport never bound is
+/// `Closed`; and a shared bind on an IPv6 address binds IPv6 (skipped on a host with no IPv6
+/// loopback).
+#[tokio::test]
+async fn the_listen_and_accept_edges() {
+    let tcp = TcpTransport::new();
+    let default = tcp.listen(&NoBind, &fixture_key()).await.expect("listen");
+    assert!(
+        default.local_addr().starts_with("127.0.0.1:"),
+        "{}",
+        default.local_addr()
+    );
+
+    let bad = TestCfg {
+        bind: "not an address".to_string(),
+    };
+    assert_eq!(
+        tcp.listen(&bad, &fixture_key()).await.err(),
+        Some(TransportError::AddressRefused)
+    );
+
+    let unknown = Listener::new(StdArc::new(TcpListenerHandle {
+        addr: "127.0.0.1:1".to_string(),
+    }));
+    assert_eq!(
+        tcp.accept(&unknown).await.err(),
+        Some(TransportError::Closed)
+    );
+
+    if std::net::TcpListener::bind("[::1]:0").is_ok() {
+        let (_v6, addr) = TcpTransport::bind_shared("[::1]:0").expect("an IPv6 shared bind");
+        assert!(addr.starts_with("[::1]:"), "{addr}");
+    }
 }
