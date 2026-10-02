@@ -5,48 +5,19 @@ version = "1.6.0"
 publish = false            # a first-party plugin crate; shipped linked into busbar or as a signed tarball
 edition = "2021"
 rust-version = "1.97"
-description = "The tcp transport: a byte stream, the base every session transport composes over."
+description = "The tcp transport: an identity framer over the host's byte stream."
 license = "Apache-2.0"
 
 [lib]
-# rlib: THE CARRIER. The busbar composition root links it (its `TcpCarrier` as the contract's
-# `Carrier`, the linked door), and the sibling `busbar-transport-tcp-plugin` cdylib re-exports it with
-# the `dropped-in` feature on as the dropped-in door (the same carrier lowered by the contract's
-# `export_carrier!` to the HOT decl, exported as `busbar_transport_decl` for the loader to `dlopen`).
-# One source, both doors (#3: a transport is swappable, compiled in OR dropped in, over the HOT lane).
+# rlib: the LINKED door (`linked::door`), which a busbar build names as a compiled-in row. The
+# dropped-in door is the sibling `busbar-transport-tcp-plugin` cdylib, which exports this same door
+# as its one symbol; this crate exports none.
 crate-type = ["rlib"]
 
-# DEPENDENCY POLICY. A transport is a plugin (#3), so its closure is `busbar-contract` plus the async
-# runtime and stream plumbing it actually needs: no plane, no kernel crate, no capability crate. Its
-# HOT-lane door is the contract's own lowering of its `Carrier` (`export_carrier!`), so no layout is
-# restated here (#84).
-[features]
-# THE DROPPED-IN DOOR (`exports`): this crate's carrier, lowered and registered as its image's one door through
-# the contract's SHARED door (`busbar_contract::export_transport!`, the #84 merge). The frozen symbols
-# (`busbar_abi`, `busbar_plugin_kind`, `busbar_transport_decl`) are defined ONCE, in the contract, so
-# this crate defines none and a link holding it beside the other plugins holds one definition of each
-# (the fat-LTO "symbol multiply defined" refusal the per-crate symbols caused). OFF in a build that
-# links this crate (the linked door is `TcpCarrier` itself); the dropped-in artifact is built on its
-# own, by the sibling adapter: `cargo build -p busbar-transport-tcp-plugin --release`.
-dropped-in = []
-
+# DEPENDENCY POLICY. A transport is a plugin, so its closure is `busbar-contract` and nothing else it
+# does not need. This one needs nothing else: the socket, its readiness and its clock are the host's.
 [dependencies]
-tokio-util = { version = "0.7", default-features = false, features = ["compat"] }
-# The ONE busbar crate a plugin names (#40: contract only). Pinned by git rev to the busbar commit in
-# `.busbar-ref`; a busbar build that links this crate `[patch]`es the busbar git source to its own
-# tree, so ONE copy of the contract links.
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "23d8a6b46deb158839df8bc02115b09023633040" }
-futures = "0.3"
-tokio = { version = "1", features = ["net", "rt", "sync", "io-util", "time"] }
-
-[dev-dependencies]
-# The TEST-ONLY seal (#65). `busbar_contract::plugin::TestKernelSeal` is the one blessed
-# fixture implementor of the SEALED `KernelSeal` trait; this crate's test harnesses used to
-# forge their own. Dev-only and feature-gated, so it is absent from every release build.
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "23d8a6b46deb158839df8bc02115b09023633040", features = ["test-seal"] }
-tokio = { version = "1", features = ["net", "rt-multi-thread", "sync", "io-util", "time", "macros", "test-util"] }
-
-[target.'cfg(unix)'.dev-dependencies]
-# The forced-EMFILE cell (tests/accept_emfile.rs) lowers RLIMIT_NOFILE, which std cannot, and the
-# accept-error table cell names the raw errno values. Already in the lock through tokio.
-libc = "0.2"
+# The ONE busbar crate a plugin names. Pinned by git rev to the busbar commit in `.busbar-ref`; a
+# busbar build that links this crate `[patch]`es the busbar git source to its own tree, so ONE copy
+# of the contract links.
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "934a016e20fc1a67c209b671d137c8cc28092767" }
