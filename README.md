@@ -5,7 +5,7 @@ First-party signed kind:transport plugin cdylib: the tcp transport, packaged as 
 
 | kind | alias | crate | busbar | license |
 |---|---|---|---|---|
-| `transport` | `tcp` | `busbar-transport-tcp-plugin` | 1.6.0 (pinned in `.busbar-ref`) | Apache-2.0 |
+| `transport` | `tcp` | `busbar-transport-tcp-plugin` | 1.6.0 (pinned in `.busbar-ref`) | MIT |
 
 [![ci](https://github.com/GetBusbar/busbar-transport-tcp/actions/workflows/ci.yml/badge.svg?branch=dev)](https://github.com/GetBusbar/busbar-transport-tcp/actions/workflows/ci.yml)
 <!-- fleet:header:end -->
