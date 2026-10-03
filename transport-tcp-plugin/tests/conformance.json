@@ -1,0 +1,29 @@
+{
+  "settings": {},
+  "transport": {
+    "locate": {
+      "reads": [
+        { "target": "tcp://example.test:80", "authority": "example.test:80", "secure": false },
+        { "target": "example.test:80", "authority": "example.test:80", "secure": false }
+      ],
+      "refuses": ["http://example.test/path", ""]
+    },
+    "dial": {
+      "emit": "to the far side",
+      "wire": "to the far side",
+      "ingest": "from the far side",
+      "frames": ["from the far side"]
+    },
+    "encode": [
+      { "body": "body", "fields": [], "wire": "body" },
+      { "body": "body", "fields": [["a", "b"]], "wire": null }
+    ],
+    "refuse": { "bytes": "refused", "wire": "refused" },
+    "handoff": {
+      "ingest": "left over bytes",
+      "detached": "t over bytes",
+      "adopt": "adopted",
+      "frames": ["adopted"]
+    }
+  }
+}
