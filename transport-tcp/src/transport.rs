@@ -1,48 +1,75 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! The `tcp` framer, as the kind's own file (`BUSBAR-1.6.0.md` THE DESIGN, §2): an IDENTITY framer
-//! over the host's socket. The slots [`crate::door`] wires into the transport kind's table: the
-//! carrier ops refused, and the framer ops that answer a byte stream as itself.
+//! The `tcp` CARRIER, as the kind's own file (`BUSBAR-1.6.0.md` THE DESIGN, §2 and §5;
+//! TRANSPORT-STACK (2)): the carrier ops over the HOST'S I/O (`busbar_contract::abi::host::io`,
+//! `io.*`), and the framer ops refused. The host owns every socket; this carrier holds only the
+//! host's opaque handles and owns the policy over them:
+//!
+//! * `listen` binds the address it is asked to, and `accept` takes each connection off it;
+//! * `dial` reads the authority it is lent (`ip:port`, `localhost:port`, `[v6]:port` or `unix:` and
+//!   an absolute path), resolves it to its addresses — a name it does not resolve: the host's one
+//!   destination judge already pinned every address it may dial — and opens them IN ORDER, one
+//!   attempt each, the next only when the one before was refused; the connect is bounded by the
+//!   open the host runs it under;
+//! * `read` answers what the socket has, straight into the host's buffer: a byte stream, so every
+//!   read completes a frame (`READ_END_OF_FRAME`); `write` hands the host what it is offered, and
+//!   a frame's end means nothing to a stream;
+//! * `flush` settles the dial (connected, or the next address, or the refusal of the last);
+//! * `shut` closes the connection whatever the reason, and forgets it; `arrival` answers the far
+//!   end's address and the local port, as the host reads them off the socket.
+//!
+//! No op holds a byte of its own: a PENDING op moved nothing, so a cancel finds nothing moved.
 
 use std::collections::{HashMap, VecDeque};
 use std::marker::PhantomData;
+use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
+use std::task::Poll;
 
 use busbar_contract::abi::mechanism::call::Outcome;
 use busbar_contract::abi::sdk::door::{AbiIn, AbiOut};
+use busbar_contract::abi::sdk::io::{Io, IoFailure, DIR_WRITE, MAX_ADDR};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
-use busbar_contract::abi::sdk::{HostBuf, Instance, Lent, Out, SafeSlot};
+use busbar_contract::abi::sdk::{Instance, Lent, Out, SafeSlot};
 use busbar_contract::abi::transport::{
-    AdoptIn, BeginIn, EmitIn, EncodeIn, FinishIn, FramePiece, FramerOut, FramerSink, FramingIn,
-    IngestIn, LocateIn, LocateOut, RefuseIn, CANCEL_NOTHING_MOVED, PIECE_END_OF_FRAME, YIELD_ENDED,
-    YIELD_MORE,
+    AcceptIn, AcceptOut, ArrivalIn, ArrivalOut, ConnIn, ConnOut, DialIn, IoOut, ListenIn,
+    ListenOut, ReadIn, ShutIn, WriteIn, CANCEL_NOTHING_MOVED, DEST_AUTHORITY, READ_END_OF_FRAME,
 };
 
 // ── the instance ─────────────────────────────────────────────────────────────────────────────────
 
-/// The framings one instance holds: the state the SDK's lifecycle opens and closes.
-pub struct Framings {
-    framings: Mutex<HashMap<u64, Framing>>,
+/// What one instance carries: its listeners and its connections, each by the token it minted.
+pub struct Carried {
+    listeners: Mutex<HashMap<u64, u64>>,
+    conns: Mutex<HashMap<u64, Conn>>,
     next: AtomicU64,
 }
 
-/// What every slot reads: the SDK's lifecycle state over [`Framings`].
-type State = Held<Framings>;
+/// One connection: the host's handle, and for a dial still settling, the addresses left to try.
+struct Conn {
+    io: u64,
+    rest: VecDeque<String>,
+    settled: bool,
+}
 
-impl Life for Framings {
-    /// No framer op pends, so a cancel finds nothing in flight.
+/// What every slot reads: the SDK's lifecycle state over [`Carried`].
+type State = Held<Carried>;
+
+impl Life for Carried {
+    /// A PENDING carrier op moved nothing, so a cancel finds nothing moved.
     const CANCEL: u32 = CANCEL_NOTHING_MOVED;
 
-    /// This framer reads no setting.
+    /// This carrier reads no setting.
     fn validate(_: &[u8]) -> Result<(), Refusal> {
         Ok(())
     }
 
     fn open(_: &[u8], _: &[&[u8]], _: u64) -> Result<Self, Refusal> {
         Ok(Self {
-            framings: Mutex::new(HashMap::new()),
+            listeners: Mutex::new(HashMap::new()),
+            conns: Mutex::new(HashMap::new()),
             next: AtomicU64::new(1),
         })
     }
@@ -52,43 +79,64 @@ impl Life for Framings {
     }
 }
 
-impl Framings {
-    fn lock(&self) -> MutexGuard<'_, HashMap<u64, Framing>> {
-        self.framings.lock().unwrap_or_else(PoisonError::into_inner)
+impl Carried {
+    fn conns(&self) -> MutexGuard<'_, HashMap<u64, Conn>> {
+        self.conns.lock().unwrap_or_else(PoisonError::into_inner)
     }
 
-    /// Install `f` under a fresh framing token, and answer the token.
-    fn begin(&self, f: Framing) -> u64 {
-        let token = self.next.fetch_add(1, Ordering::Relaxed);
-        self.lock().insert(token, f);
-        token
+    fn listeners(&self) -> MutexGuard<'_, HashMap<u64, u64>> {
+        self.listeners.lock().unwrap_or_else(PoisonError::into_inner)
+    }
+
+    fn mint(&self) -> u64 {
+        self.next.fetch_add(1, Ordering::Relaxed)
+    }
+
+    /// The host handle of connection `conn`.
+    fn handle(&self, conn: u64) -> Option<u64> {
+        self.conns().get(&conn).map(|c| c.io)
     }
 }
 
-/// One connection's framing: the bytes owed to each side and not yet answered.
-#[derive(Default)]
-struct Framing {
-    /// Bytes the far side sent, not yet answered as frame bytes.
-    inbound: VecDeque<u8>,
-    /// The far side ended.
-    ended: bool,
-    /// Bytes owed to the far side, not yet answered as wire bytes.
-    outbound: VecDeque<u8>,
+/// The open instance and the host's I/O for this op, or the refusal a call on none earns.
+fn carried<'a>(i: &Instance<'a, State>) -> Result<(&'a Carried, Io<'a>), Refusal> {
+    let held = i
+        .get()
+        .ok_or_else(|| Refusal::failed("no open instance"))?;
+    let io = held
+        .host()
+        .map(|h| h.io(i.ticket()))
+        .filter(Io::armed)
+        .ok_or_else(|| Refusal::failed("the host lent this carrier no I/O"))?;
+    Ok((held.life(), io))
 }
 
-/// The open instance, or the refusal a call on none earns.
-fn framings<'a>(i: &Instance<'a, State>) -> Result<&'a Framings, Refusal> {
-    i.get()
-        .map(Held::life)
-        .ok_or_else(|| Refusal::failed("no open instance"))
+/// The host's answer, as this op's refusal: the host's policy is REFUSED, the system's FAILED, each
+/// with the host's own words.
+fn refusal(e: &IoFailure) -> Refusal {
+    match e {
+        IoFailure::Refused(t) => Refusal::refused(t.clone()),
+        other => Refusal::failed(other.text().to_owned()),
+    }
 }
 
-// ── the carrier ops: refused ─────────────────────────────────────────────────────────────────────
+/// Run `body` over the instance and its I/O, failing the op without one.
+macro_rules! over {
+    ($inst:expr, $o:expr, |$c:ident, $io:ident| $body:block) => {
+        match carried(&$inst) {
+            Ok(($c, mut $io)) => $body,
+            Err(r) => return $o.fail(r),
+        }
+    };
+}
 
-/// A carrier op: REFUSED. The socket is the host's, so this framer carries nothing.
-pub struct NotACarrier<I, O>(PhantomData<(I, O)>);
+// ── the framer ops: refused ──────────────────────────────────────────────────────────────────────
 
-impl<I: AbiIn, O: AbiOut> SafeSlot for NotACarrier<I, O> {
+/// A framer op: REFUSED. A carrier frames nothing (`abi::transport`: a transport fills the slots of
+/// the role it does not play with a stub that answers REFUSED).
+pub struct NotAFramer<I, O>(PhantomData<(I, O)>);
+
+impl<I: AbiIn, O: AbiOut> SafeSlot for NotAFramer<I, O> {
     type In = I;
     type Out = O;
     type State = State;
@@ -97,283 +145,304 @@ impl<I: AbiIn, O: AbiOut> SafeSlot for NotACarrier<I, O> {
     }
 }
 
-// ── the framer ───────────────────────────────────────────────────────────────────────────────────
+// ── the carrier ──────────────────────────────────────────────────────────────────────────────────
 
-/// `locate`: `host:port` or `tcp://host:port` is the authority; no name, no connection security.
-pub struct Locate;
-impl SafeSlot for Locate {
-    type In = LocateIn;
-    type Out = LocateOut;
+/// `listen`: bind the address, and answer the address bound into the host's buffer.
+pub struct Listen;
+impl SafeSlot for Listen {
+    type In = ListenIn;
+    type Out = ListenOut;
     type State = State;
-    fn call(_: Instance<'_, State>, i: Lent<'_, LocateIn>, mut o: Out<'_, LocateOut>) -> Outcome {
-        let target = i.field(|x| &x.target).bytes();
-        let authority = target.strip_prefix(b"tcp://").unwrap_or(target);
-        if authority.is_empty() || authority.contains(&b'/') {
-            return o.fail(Refusal::failed("locate: the target is not host:port"));
-        }
-        o.set(|o| &o.secure, 0);
-        o.set(|o| &o.has_name, 0);
-        let mut buf = i.authority_buf();
-        if authority.len() > buf.cap() {
-            o.set(|o| &o.authority_needed, authority.len() as u64);
-            return o.fail(Refusal::failed("locate: the authority buffer is too small"));
-        }
-        buf.extend(authority);
-        o.set(|o| &o.authority_written, authority.len() as u64);
-        Outcome::Ready
-    }
-}
-
-/// `begin`: either side; nothing is owed to the far side first.
-pub struct Begin;
-impl SafeSlot for Begin {
-    type In = BeginIn;
-    type Out = FramerOut;
-    type State = State;
-    fn call(inst: Instance<'_, State>, _: Lent<'_, BeginIn>, mut o: Out<'_, FramerOut>) -> Outcome {
-        let s = match framings(&inst) {
-            Ok(s) => s,
-            Err(r) => return o.fail(r),
+    fn call(inst: Instance<'_, State>, i: Lent<'_, ListenIn>, mut o: Out<'_, ListenOut>) -> Outcome {
+        let Ok(bind) = i.field(|x| &x.bind).as_str() else {
+            return o.fail(Refusal::failed("listen: the bind address is not UTF-8"));
         };
-        let token = s.begin(Framing::default());
-        o.set(|o| &o.framing, token);
-        Outcome::Ready
-    }
-}
-
-/// `adopt`: the bytes another framer left unconsumed are this connection's first frame.
-pub struct Adopt;
-impl SafeSlot for Adopt {
-    type In = AdoptIn;
-    type Out = FramerOut;
-    type State = State;
-    fn call(inst: Instance<'_, State>, i: Lent<'_, AdoptIn>, mut o: Out<'_, FramerOut>) -> Outcome {
-        let s = match framings(&inst) {
-            Ok(s) => s,
-            Err(r) => return o.fail(r),
-        };
-        let mut f = Framing::default();
-        f.inbound.extend(i.leftover());
-        f.answer(i.field(|x| &x.sink), &mut o);
-        let token = s.begin(f);
-        o.set(|o| &o.framing, token);
-        Outcome::Ready
-    }
-}
-
-/// Run `op` on the framing `token` names and answer what it owes into `sink`.
-fn with(
-    inst: &Instance<'_, State>,
-    token: u64,
-    sink: Lent<'_, FramerSink>,
-    o: &mut Out<'_, FramerOut>,
-    op: impl FnOnce(&mut Framing),
-) -> Outcome {
-    let s = match framings(inst) {
-        Ok(s) => s,
-        Err(r) => return o.fail(r),
-    };
-    let mut framings = s.lock();
-    let Some(f) = framings.get_mut(&token) else {
-        return o.fail(Refusal::failed("no such framing"));
-    };
-    op(f);
-    f.answer(sink, o);
-    Outcome::Ready
-}
-
-/// `ingest`: the bytes are one frame on stream `0`; the far side's end ends the connection.
-pub struct Ingest;
-impl SafeSlot for Ingest {
-    type In = IngestIn;
-    type Out = FramerOut;
-    type State = State;
-    fn call(
-        inst: Instance<'_, State>,
-        i: Lent<'_, IngestIn>,
-        mut o: Out<'_, FramerOut>,
-    ) -> Outcome {
-        let bytes = i.bytes();
-        with(&inst, i.framing, i.field(|x| &x.sink), &mut o, |f| {
-            f.inbound.extend(bytes);
-            f.ended |= i.end != 0;
+        over!(inst, o, |c, io| {
+            let mut addr = i.addr_buf();
+            match io.listen_host(bind, &mut addr) {
+                Ok(h) => {
+                    let token = c.mint();
+                    c.listeners().insert(token, h);
+                    o.set(|o| &o.listener, token);
+                    o.set(|o| &o.addr_written, addr.asked() as u64);
+                    Outcome::Ready
+                }
+                Err(e) => o.fail(refusal(&e)),
+            }
         })
     }
 }
 
-/// `emit`: the bytes are the wire bytes.
-pub struct Emit;
-impl SafeSlot for Emit {
-    type In = EmitIn;
-    type Out = FramerOut;
+/// `accept`: the next connection off the listener, its far end into the host's buffer.
+pub struct Accept;
+impl SafeSlot for Accept {
+    type In = AcceptIn;
+    type Out = AcceptOut;
     type State = State;
-    fn call(inst: Instance<'_, State>, i: Lent<'_, EmitIn>, mut o: Out<'_, FramerOut>) -> Outcome {
-        let bytes = i.bytes();
-        with(&inst, i.framing, i.field(|x| &x.sink), &mut o, |f| {
-            f.outbound.extend(bytes);
+    fn call(inst: Instance<'_, State>, i: Lent<'_, AcceptIn>, mut o: Out<'_, AcceptOut>) -> Outcome {
+        over!(inst, o, |c, io| {
+            let Some(l) = c.listeners().get(&i.listener).copied() else {
+                return o.fail(Refusal::failed("accept: no such listener"));
+            };
+            let mut peer = i.peer_buf();
+            match io.accept_host(l, &mut peer) {
+                Poll::Pending => Outcome::Pending,
+                Poll::Ready(Ok(h)) => {
+                    let token = c.mint();
+                    c.conns().insert(
+                        token,
+                        Conn {
+                            io: h,
+                            rest: VecDeque::new(),
+                            settled: true,
+                        },
+                    );
+                    o.set(|o| &o.conn, token);
+                    o.set(|o| &o.peer_written, peer.asked() as u64);
+                    Outcome::Ready
+                }
+                Poll::Ready(Err(e)) => o.fail(refusal(&e)),
+            }
         })
     }
 }
 
-/// `refuse`: the refusal's bytes are the wire bytes.
-pub struct Refuse;
-impl SafeSlot for Refuse {
-    type In = RefuseIn;
-    type Out = FramerOut;
-    type State = State;
-    fn call(
-        inst: Instance<'_, State>,
-        i: Lent<'_, RefuseIn>,
-        mut o: Out<'_, FramerOut>,
-    ) -> Outcome {
-        let bytes = i.bytes();
-        with(&inst, i.framing, i.field(|x| &x.sink), &mut o, |f| {
-            f.outbound.extend(bytes);
-        })
+/// THE DIAL ORDER: an authority's addresses, in the order they are tried. An IP literal (`v4:port`
+/// or `[v6]:port`) is itself; `localhost` is the IPv4 loopback; a unix-domain path is itself. A
+/// name is not resolved here: the host's one destination judge resolves and pins every address a
+/// dial may reach, and hands this carrier the pinned address.
+#[must_use]
+pub fn resolve(authority: &str) -> Option<Vec<String>> {
+    let authority = authority.strip_prefix("tcp://").unwrap_or(authority);
+    if authority.starts_with("unix:/") {
+        return Some(vec![authority.to_owned()]);
     }
+    if let Ok(at) = authority.parse::<SocketAddr>() {
+        return Some(vec![at.to_string()]);
+    }
+    let (host, port) = authority.rsplit_once(':')?;
+    let port = port.parse::<u16>().ok()?;
+    host.eq_ignore_ascii_case("localhost")
+        .then(|| vec![SocketAddr::from(([127, 0, 0, 1], port)).to_string()])
 }
 
-/// `timer`: this framer asks for no deadline; a call answers what is still owed.
-pub struct Timer;
-impl SafeSlot for Timer {
-    type In = FramingIn;
-    type Out = FramerOut;
-    type State = State;
-    fn call(
-        inst: Instance<'_, State>,
-        i: Lent<'_, FramingIn>,
-        mut o: Out<'_, FramerOut>,
-    ) -> Outcome {
-        with(&inst, i.framing, i.field(|x| &x.sink), &mut o, |_| {})
-    }
-}
-
-/// `finish`: the framing is forgotten; no frame follows.
-pub struct Finish;
-impl SafeSlot for Finish {
-    type In = FinishIn;
-    type Out = FramerOut;
-    type State = State;
-    fn call(
-        inst: Instance<'_, State>,
-        i: Lent<'_, FinishIn>,
-        mut o: Out<'_, FramerOut>,
-    ) -> Outcome {
-        let s = match framings(&inst) {
-            Ok(s) => s,
-            Err(r) => return o.fail(r),
-        };
-        if s.lock().remove(&i.framing).is_none() {
-            return o.fail(Refusal::failed("finish: no such framing"));
+/// Open the first of `rest` the host will begin, in order; the handle, or the last refusal.
+fn open_next(io: &mut Io<'_>, rest: &mut VecDeque<String>) -> Result<u64, IoFailure> {
+    let mut last = IoFailure::Refused("dial: no address to open".into());
+    while let Some(addr) = rest.pop_front() {
+        match io.open(&addr) {
+            Ok(h) => return Ok(h),
+            Err(e) => last = e,
         }
-        o.set(|o| &o.yielded.flags, YIELD_ENDED);
-        Outcome::Ready
     }
+    Err(last)
 }
 
-/// `detach`: every byte ingested and not yet answered, into `frame`, and the framing is forgotten.
-/// A sink too small for them answers `YIELD_MORE` and keeps the framing until the rest is taken.
-pub struct Detach;
-impl SafeSlot for Detach {
-    type In = FramingIn;
-    type Out = FramerOut;
+/// `dial`: an authority's addresses, opened in order; the connection's token at once, its connect
+/// settling under `flush`. A program is not this carrier's destination: REFUSED.
+pub struct Dial;
+impl SafeSlot for Dial {
+    type In = DialIn;
+    type Out = ConnOut;
     type State = State;
-    fn call(
-        inst: Instance<'_, State>,
-        i: Lent<'_, FramingIn>,
-        mut o: Out<'_, FramerOut>,
-    ) -> Outcome {
-        let s = match framings(&inst) {
-            Ok(s) => s,
-            Err(r) => return o.fail(r),
+    fn call(inst: Instance<'_, State>, i: Lent<'_, DialIn>, mut o: Out<'_, ConnOut>) -> Outcome {
+        let Some(dest) = i.dest() else {
+            return o.fail(Refusal::failed("dial: no destination"));
         };
-        let mut framings = s.lock();
-        let Some(f) = framings.get_mut(&i.framing) else {
-            return o.fail(Refusal::failed("detach: no such framing"));
-        };
-        let n = drain_into(&mut f.inbound, &mut i.field(|x| &x.sink).frame());
-        o.set(|o| &o.yielded.frame_len, n as u64);
-        if f.inbound.is_empty() {
-            framings.remove(&i.framing);
-            o.set(|o| &o.yielded.flags, YIELD_ENDED);
-        } else {
-            o.set(|o| &o.yielded.flags, YIELD_MORE);
-        }
-        Outcome::Ready
-    }
-}
-
-/// `encode`: a byte stream has no head, so the envelope is its body; fields are refused.
-pub struct Encode;
-impl SafeSlot for Encode {
-    type In = EncodeIn;
-    type Out = FramerOut;
-    type State = State;
-    fn call(_: Instance<'_, State>, i: Lent<'_, EncodeIn>, mut o: Out<'_, FramerOut>) -> Outcome {
-        if i.fields_len != 0 {
-            return o.fail(Refusal::failed("encode: a byte stream carries no fields"));
-        }
-        let body = i.body();
-        let mut wire = i.field(|x| &x.sink).wire();
-        if body.len() > wire.cap() {
-            // `encode` renders a whole message at once: the host gives it room for the body.
-            return o.fail(Refusal::failed(
-                "encode: the wire buffer is smaller than the body",
+        if dest.kind != DEST_AUTHORITY {
+            return o.fail(Refusal::refused(
+                "dial: a tcp carrier reaches an authority, never a program",
             ));
         }
-        wire.extend(body);
-        o.set(|o| &o.yielded.wire_len, body.len() as u64);
-        Outcome::Ready
-    }
-}
-
-/// Move as many bytes off the front of `from` as `to` has room for; answers how many.
-fn drain_into(from: &mut VecDeque<u8>, to: &mut HostBuf<'_, u8>) -> usize {
-    let (a, b) = from.as_slices();
-    let mut n = to.stream(a);
-    if n == a.len() {
-        n += to.stream(b);
-    }
-    from.drain(..n);
-    n
-}
-
-impl Framing {
-    /// Answer into `sink` what this framing owes: wire bytes, then the inbound frame as one piece
-    /// (the one that drains it ends the frame), then the connection's end once nothing is left.
-    fn answer(&mut self, sink: Lent<'_, FramerSink>, o: &mut Out<'_, FramerOut>) {
-        let wire = drain_into(&mut self.outbound, &mut sink.wire());
-        o.set(|o| &o.yielded.wire_len, wire as u64);
-        let mut pieces = sink.pieces();
-        let mut frame = sink.frame();
-        if !self.inbound.is_empty() && pieces.cap() > 0 && frame.cap() > 0 {
-            let n = drain_into(&mut self.inbound, &mut frame);
-            let flags = if self.inbound.is_empty() {
-                PIECE_END_OF_FRAME
-            } else {
-                0
-            };
-            pieces.push(FramePiece {
-                stream: 0,
-                offset: 0,
-                len: n as u64,
-                code: 0,
-                status_class: 0,
-                flags,
-                _reserved: 0,
-                retry_after_secs: 0,
-            });
-            o.set(|o| &o.yielded.frame_len, n as u64);
-            o.set(|o| &o.yielded.pieces_len, 1);
-        }
-        let owed = !self.outbound.is_empty() || !self.inbound.is_empty();
-        let flags = if owed {
-            YIELD_MORE
-        } else if self.ended {
-            YIELD_ENDED
-        } else {
-            0
+        let Ok(authority) = dest.field(|d| &d.authority).as_str() else {
+            return o.fail(Refusal::failed("dial: the authority is not UTF-8"));
         };
-        o.set(|o| &o.yielded.flags, flags);
+        let Some(addrs) = resolve(authority) else {
+            return o.fail(Refusal::refused(format!(
+                "`{authority}` is not an address the carrier dials without resolving a name"
+            )));
+        };
+        over!(inst, o, |c, io| {
+            let mut rest: VecDeque<String> = addrs.into();
+            match open_next(&mut io, &mut rest) {
+                Ok(h) => {
+                    let token = c.mint();
+                    c.conns().insert(
+                        token,
+                        Conn {
+                            io: h,
+                            rest,
+                            settled: false,
+                        },
+                    );
+                    o.set(|o| &o.conn, token);
+                    Outcome::Ready
+                }
+                Err(e) => o.fail(refusal(&e)),
+            }
+        })
+    }
+}
+
+/// `flush`: a dial settles — connected; or refused, and the next address is opened; or refused
+/// with none left, and the dial answers the far end's refusal. Nothing is held to write.
+pub struct Flush;
+impl SafeSlot for Flush {
+    type In = ConnIn;
+    type Out = busbar_contract::abi::mechanism::call::OutHead;
+    type State = State;
+    fn call(
+        inst: Instance<'_, State>,
+        i: Lent<'_, ConnIn>,
+        mut o: Out<'_, busbar_contract::abi::mechanism::call::OutHead>,
+    ) -> Outcome {
+        over!(inst, o, |c, io| {
+            loop {
+                let (h, settled) = match c.conns().get(&i.conn) {
+                    Some(conn) => (conn.io, conn.settled),
+                    None => return o.fail(Refusal::failed("flush: no such connection")),
+                };
+                if settled {
+                    return Outcome::Ready;
+                }
+                match io.ready(h, DIR_WRITE) {
+                    Poll::Pending => return Outcome::Pending,
+                    Poll::Ready(Ok(())) => {
+                        if let Some(conn) = c.conns().get_mut(&i.conn) {
+                            conn.settled = true;
+                            conn.rest.clear();
+                        }
+                        return Outcome::Ready;
+                    }
+                    Poll::Ready(Err(e)) => {
+                        let _ = io.close(h);
+                        let mut rest = c
+                            .conns()
+                            .get_mut(&i.conn)
+                            .map(|conn| std::mem::take(&mut conn.rest))
+                            .unwrap_or_default();
+                        if rest.is_empty() {
+                            c.conns().remove(&i.conn);
+                            return o.fail(refusal(&e));
+                        }
+                        match open_next(&mut io, &mut rest) {
+                            Ok(next) => {
+                                if let Some(conn) = c.conns().get_mut(&i.conn) {
+                                    conn.io = next;
+                                    conn.rest = rest;
+                                }
+                            }
+                            Err(e) => {
+                                c.conns().remove(&i.conn);
+                                return o.fail(refusal(&e));
+                            }
+                        }
+                    }
+                }
+            }
+        })
+    }
+}
+
+/// `read`: what the socket has, straight into the host's buffer; every read a frame of the stream.
+pub struct Read;
+impl SafeSlot for Read {
+    type In = ReadIn;
+    type Out = IoOut;
+    type State = State;
+    fn call(inst: Instance<'_, State>, i: Lent<'_, ReadIn>, mut o: Out<'_, IoOut>) -> Outcome {
+        over!(inst, o, |c, io| {
+            let Some(h) = c.handle(i.conn) else {
+                return o.fail(Refusal::failed("read: no such connection"));
+            };
+            let mut buf = i.buf();
+            match io.read_host(h, &mut buf) {
+                Poll::Pending => Outcome::Pending,
+                Poll::Ready(Ok(n)) => {
+                    o.set(|o| &o.len, n as u64);
+                    if n > 0 {
+                        o.set(|o| &o.flags, READ_END_OF_FRAME);
+                    }
+                    Outcome::Ready
+                }
+                Poll::Ready(Err(e)) => o.fail(refusal(&e)),
+            }
+        })
+    }
+}
+
+/// `write`: what the socket takes of the bytes offered.
+pub struct Write;
+impl SafeSlot for Write {
+    type In = WriteIn;
+    type Out = IoOut;
+    type State = State;
+    fn call(inst: Instance<'_, State>, i: Lent<'_, WriteIn>, mut o: Out<'_, IoOut>) -> Outcome {
+        let bytes = i.bytes();
+        over!(inst, o, |c, io| {
+            let Some(h) = c.handle(i.conn) else {
+                return o.fail(Refusal::failed("write: no such connection"));
+            };
+            match io.write(h, bytes) {
+                Poll::Pending => Outcome::Pending,
+                Poll::Ready(Ok(n)) => {
+                    o.set(|o| &o.len, n as u64);
+                    Outcome::Ready
+                }
+                Poll::Ready(Err(e)) => o.fail(refusal(&e)),
+            }
+        })
+    }
+}
+
+/// `shut`: the connection is closed, whatever the reason, and forgotten. An unknown connection is
+/// already closed.
+pub struct Shut;
+impl SafeSlot for Shut {
+    type In = ShutIn;
+    type Out = busbar_contract::abi::mechanism::call::OutHead;
+    type State = State;
+    fn call(
+        inst: Instance<'_, State>,
+        i: Lent<'_, ShutIn>,
+        mut o: Out<'_, busbar_contract::abi::mechanism::call::OutHead>,
+    ) -> Outcome {
+        over!(inst, o, |c, io| {
+            if let Some(conn) = c.conns().remove(&i.conn) {
+                let _ = io.close(conn.io);
+            }
+            Outcome::Ready
+        })
+    }
+}
+
+/// `arrival`: the far end's address and the local port, as the host reads them off the socket.
+pub struct Arrival;
+impl SafeSlot for Arrival {
+    type In = ArrivalIn;
+    type Out = ArrivalOut;
+    type State = State;
+    fn call(inst: Instance<'_, State>, i: Lent<'_, ArrivalIn>, mut o: Out<'_, ArrivalOut>) -> Outcome {
+        over!(inst, o, |c, io| {
+            let Some(h) = c.handle(i.conn) else {
+                return o.fail(Refusal::failed("arrival: no such connection"));
+            };
+            let mut peer = [0_u8; MAX_ADDR];
+            match io.ends(h, &mut peer) {
+                Ok((port, n)) => {
+                    let mut buf = i.peer_buf();
+                    buf.extend(&peer[..n]);
+                    o.set(|o| &o.local_port, port);
+                    o.set(|o| &o.peer_written, buf.written() as u64);
+                    o.set(|o| &o.peer_needed, buf.needed() as u64);
+                    if buf.fits() {
+                        Outcome::Ready
+                    } else {
+                        o.fail(Refusal::failed("arrival: the peer buffer is too small"))
+                    }
+                }
+                Err(e) => o.fail(refusal(&e)),
+            }
+        })
     }
 }
