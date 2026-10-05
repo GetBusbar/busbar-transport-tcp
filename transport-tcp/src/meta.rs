@@ -7,7 +7,7 @@
 
 use busbar_contract::abi::mechanism::call::AbiStr;
 use busbar_contract::abi::mechanism::door::KindTailHead;
-use busbar_contract::abi::transport::{TransportTail, FRAMING_STREAM, ROLE_FRAMER};
+use busbar_contract::abi::transport::{TransportTail, FRAMING_STREAM, ROLE_CARRIER};
 
 /// The claim this entry answers for.
 pub const KEY: &str = "tcp";
@@ -18,13 +18,15 @@ pub(crate) const NONE: AbiStr = AbiStr {
     len: 0,
 };
 
-/// The transport kind's tail: a framer over the host's socket, composing over nothing.
+/// The transport kind's tail: the CARRIER of the host's byte stream (its role stated, busbar
+/// ARCHITECT ruling Q128 U7: the connector carries a tcp need as a raw stream, frames no opening
+/// message for it, and may secure it mid-way), composing over nothing.
 pub(crate) const TAIL: TransportTail = TransportTail {
     head: KindTailHead {
         size: std::mem::size_of::<TransportTail>() as u32,
         _reserved: 0,
     },
-    role: ROLE_FRAMER,
+    role: ROLE_CARRIER,
     framing: FRAMING_STREAM,
     facts: 0,
     handshake_max_steps: 0,
