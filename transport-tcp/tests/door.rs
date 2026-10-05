@@ -16,7 +16,7 @@ use busbar_contract::abi::transport::check::{check_framer, check_tail};
 use busbar_contract::abi::transport::{
     slot, AdoptIn, BeginIn, ConnOut, DialIn, EmitIn, EncodeIn, FinishIn, FramePiece, FramerOut,
     FramerSink, FramingIn, IngestIn, LocateIn, LocateOut, Ops, TransportTail, PIECE_END_OF_FRAME,
-    ROLE_FRAMER, SIDE_ACCEPT, YIELD_ENDED, YIELD_MORE,
+    ROLE_CARRIER, SIDE_ACCEPT, YIELD_ENDED, YIELD_MORE,
 };
 use busbar_transport_tcp::door::{door, STATEMENT};
 
@@ -189,11 +189,12 @@ impl Host {
 }
 
 #[test]
-fn the_tail_is_a_framer_over_the_host_socket() {
+fn the_tail_is_the_carrier_of_the_host_socket() {
     let st = STATEMENT;
     // SAFETY: the Statement's kind tail is this crate's `'static` `TransportTail`.
     let tail = unsafe { &*st.kind_tail.cast::<TransportTail>() };
-    assert_eq!(tail.role, ROLE_FRAMER);
+    // busbar ARCHITECT ruling Q128 U7: the role is stated, and tcp carries the host's byte stream.
+    assert_eq!(tail.role, ROLE_CARRIER);
     assert_eq!(tail.composes_over_len, 0);
     assert_eq!(check_tail(tail), Ok(()));
 }
