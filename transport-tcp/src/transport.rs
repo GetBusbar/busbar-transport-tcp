@@ -360,7 +360,7 @@ impl Framing {
                 code: 0,
                 status_class: 0,
                 flags,
-                _reserved: 0,
+                fault: 0,
                 retry_after_secs: 0,
             });
             o.set(|o| &o.yielded.frame_len, n as u64);
