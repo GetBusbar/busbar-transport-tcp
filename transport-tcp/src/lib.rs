@@ -17,7 +17,13 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
+// THE KIND'S SKELETON (`BUSBAR-1.6.0.md` THE DESIGN, §2), the same files every transport twin
+// carries: what it declares (`meta`), what it claims (`claims`), the entry (`transport`), and the
+// door that states them.
+mod claims;
 pub mod door;
+mod meta;
+mod transport;
 
 /// THE TRANSPORT AXIS ENTRY: what the composition root folds for this transport: its key, the
 /// layers it declares and its door. The root names none of them.
