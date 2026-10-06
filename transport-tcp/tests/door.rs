@@ -1,35 +1,48 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! The identity framer, driven through its own table the way the host drives it: every answer is
-//! judged by the kind's `check_framer`, a full sink is back-pressure re-called with no new bytes,
-//! and every byte comes out exactly once, in order. (An integration test, so the crate itself stays
-//! `#![forbid(unsafe_code)]`: driving a raw table is the host's side, and needs it.)
+//! The `tcp` carrier, driven through its own table the way the host drives it, over a SCRIPTED host
+//! I/O table (`abi::host::io`): the dial order over an authority's addresses, the settling of a
+//! connect, the frame bit on every read, the close, the arrival facts, and every framer op refused.
+//! (An integration test, so the crate itself stays `#![forbid(unsafe_code)]`: driving a raw table is
+//! the host's side, and needs it.) The real host's I/O is driven by busbar's conformance suite
+//! (`tests/conformance.rs` of the plugin crate).
 
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
+use std::sync::Mutex;
 
-use busbar_contract::abi::mechanism::call::{AbiStr, Field, InHead, Op, OutHead, Outcome};
+use busbar_contract::abi::host::io::{
+    AddrIn, HandleIn, IoSlots, OpenIn as IoOpenIn, ReadIn as IoReadIn, ReadyIn, SLOTS,
+};
+use busbar_contract::abi::host::service::ServiceOut;
+use busbar_contract::abi::mechanism::call::{AbiStr, InHead, Op, OutHead, Outcome, RawOutcome};
 use busbar_contract::abi::mechanism::door::Door;
 use busbar_contract::abi::mechanism::lifecycle::{slot as life, OpenIn, OpenOut};
-use busbar_contract::abi::transport::check::{check_framer, check_tail};
+use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
+use busbar_contract::abi::transport::check::{check_io, check_tail};
 use busbar_contract::abi::transport::{
-    slot, AdoptIn, BeginIn, ConnOut, DialIn, EmitIn, EncodeIn, FinishIn, FramePiece, FramerOut,
-    FramerSink, FramingIn, IngestIn, LocateIn, LocateOut, Ops, TransportTail, PIECE_END_OF_FRAME,
-    ROLE_CARRIER, SIDE_ACCEPT, YIELD_ENDED, YIELD_MORE,
+    slot, ArrivalIn, ArrivalOut, ConnIn, ConnOut, Destination, DialIn, FramerOut, IngestIn, IoOut,
+    LocateIn, LocateOut, Ops, ReadIn, ShutIn, TransportTail, DEST_AUTHORITY, DEST_PROGRAM,
+    READ_END_OF_FRAME, ROLE_CARRIER,
 };
-use busbar_transport_tcp::door::{door, STATEMENT};
+use busbar_transport_tcp::door::{door, resolve, STATEMENT};
 
 fn z<T>() -> T {
     // SAFETY: every `in`/`out` here is plain C data; all-zero is a valid value of each.
     unsafe { zeroed() }
 }
 
-fn s(t: &'static str) -> AbiStr {
+fn s(t: &str) -> AbiStr {
     AbiStr {
         ptr: t.as_ptr(),
         len: t.len(),
     }
+}
+
+fn text(t: AbiStr) -> String {
+    // SAFETY: the carrier's string, live for the call.
+    String::from_utf8(unsafe { std::slice::from_raw_parts(t.ptr, t.len) }.to_vec()).unwrap()
 }
 
 fn ops() -> &'static Ops {
@@ -44,6 +57,10 @@ fn call<I, O>(op: Option<Op>, inst: *mut c_void, i: &mut I, o: &mut O, index: u3
         let ih = std::ptr::from_mut(i).cast::<InHead>();
         (*ih).size = size_of::<I>() as u32;
         (*ih).op = index;
+        (*ih).ticket = Ticket {
+            slot: 1,
+            generation: 1,
+        };
         let oh = std::ptr::from_mut(o).cast::<OutHead>();
         (*oh).size = size_of::<O>() as u32;
     }
@@ -55,326 +72,338 @@ fn call<I, O>(op: Option<Op>, inst: *mut c_void, i: &mut I, o: &mut O, index: u3
     .outcome()
 }
 
-/// The host: an open instance, one framing, and a sink of the given capacities.
-struct Host {
-    inst: *mut c_void,
-    framing: u64,
-    wire: Vec<u8>,
-    frame: Vec<u8>,
-    pieces: Vec<FramePiece>,
-    /// Everything the framer answered: wire bytes, and frame bytes with their pieces' flags.
-    wire_log: Vec<u8>,
-    frames: Vec<(Vec<u8>, u16)>,
-    flags: u32,
+// ── the scripted host ────────────────────────────────────────────────────────────────────────────
+
+/// What the scripted host saw and what it answers.
+#[derive(Default)]
+struct Script {
+    /// Every address `io.open` was asked for, in order.
+    opened: Vec<String>,
+    /// Addresses `io.open` refuses at once.
+    refuse_open: Vec<String>,
+    /// Handles whose connect `io.ready` fails.
+    fail_ready: Vec<u64>,
+    /// Handles closed.
+    closed: Vec<u64>,
+    /// What `io.read` answers next: `None` = PENDING.
+    reads: Vec<Option<Vec<u8>>>,
 }
 
-impl Host {
-    fn new(wire: usize, frame: usize, pieces: usize) -> Self {
-        let mut i: OpenIn = z();
-        let mut o: OpenOut = z();
-        let r = call(
-            ops().head.open,
-            std::ptr::null_mut(),
-            &mut i,
-            &mut o,
-            life::OPEN,
-        );
-        assert_eq!(r, Outcome::Ready);
-        let mut h = Self {
-            inst: o.instance,
-            framing: 0,
-            wire: vec![0; wire],
-            frame: vec![0; frame],
-            pieces: vec![z(); pieces],
-            wire_log: Vec::new(),
-            frames: Vec::new(),
-            flags: 0,
-        };
-        let mut i: BeginIn = z();
-        i.side = SIDE_ACCEPT;
-        i.sink = h.sink();
-        let mut o: FramerOut = z();
-        let r = call(ops().begin, h.inst, &mut i, &mut o, slot::BEGIN);
-        h.framing = o.framing;
-        h.take(r, &o);
-        h
-    }
+static SCRIPT: Mutex<Option<Script>> = Mutex::new(None);
+/// One test at a time: they share the scripted host.
+static ONE: Mutex<()> = Mutex::new(());
 
-    fn sink(&mut self) -> FramerSink {
-        FramerSink {
-            wire: self.wire.as_mut_ptr(),
-            wire_cap: self.wire.len(),
-            frame: self.frame.as_mut_ptr(),
-            frame_cap: self.frame.len(),
-            pieces: self.pieces.as_mut_ptr(),
-            pieces_cap: self.pieces.len(),
-            now_monotonic_ns: 1,
-            now_unix_ns: 1,
-            heads: std::ptr::null_mut(),
-            heads_cap: 0,
+fn with<R>(f: impl FnOnce(&mut Script) -> R) -> R {
+    f(SCRIPT.lock().unwrap().get_or_insert_with(Script::default))
+}
+
+fn answer(
+    out: *mut ServiceOut,
+    o: Outcome,
+    value: u64,
+    len: u64,
+    error: &'static str,
+) -> RawOutcome {
+    // SAFETY: the carrier's `out`, live for the call.
+    unsafe {
+        (*out).outcome = RawOutcome::of(o);
+        (*out).value = value;
+        (*out).len = len;
+        (*out).error = s(error);
+    }
+    RawOutcome::of(o)
+}
+
+extern "C" fn io_open(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    // SAFETY: the carrier's `in`.
+    let i = unsafe { input.cast::<IoOpenIn>().read() };
+    let addr = text(i.addr);
+    with(|sc| {
+        sc.opened.push(addr.clone());
+        if sc.refuse_open.contains(&addr) {
+            answer(
+                out,
+                Outcome::Failed,
+                0,
+                0,
+                "Connection refused (os error 111)",
+            )
+        } else {
+            answer(out, Outcome::Ready, sc.opened.len() as u64, 0, "")
         }
-    }
+    })
+}
 
-    fn take(&mut self, r: Outcome, o: &FramerOut) -> Outcome {
-        let n = o.yielded.pieces_len as usize;
-        check_framer(
-            r,
-            o,
-            &self.pieces[..n],
-            self.wire.len() as u64,
-            self.frame.len() as u64,
-            self.pieces.len() as u64,
+extern "C" fn io_ready(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    // SAFETY: the carrier's `in`.
+    let i = unsafe { input.cast::<ReadyIn>().read() };
+    if with(|sc| sc.fail_ready.contains(&i.handle)) {
+        answer(
+            out,
+            Outcome::Failed,
+            0,
+            0,
+            "Connection refused (os error 111)",
         )
-        .expect("the answer passes the kind's check");
-        self.wire_log
-            .extend_from_slice(&self.wire[..o.yielded.wire_len as usize]);
-        for p in &self.pieces[..n] {
-            assert_eq!(p.stream, 0, "a byte stream has one stream");
-            let at = p.offset as usize;
-            self.frames
-                .push((self.frame[at..at + p.len as usize].to_vec(), p.flags));
-        }
-        self.flags = o.yielded.flags;
-        r
-    }
-
-    /// Re-call `index` with no new bytes until it stops owing.
-    fn drain(&mut self, index: u32) {
-        while self.flags & YIELD_MORE != 0 {
-            let mut o: FramerOut = z();
-            let r = if index == slot::INGEST {
-                let mut i: IngestIn = z();
-                i.framing = self.framing;
-                i.sink = self.sink();
-                call(ops().ingest, self.inst, &mut i, &mut o, index)
-            } else {
-                let mut i: EmitIn = z();
-                i.framing = self.framing;
-                i.sink = self.sink();
-                call(ops().emit, self.inst, &mut i, &mut o, index)
-            };
-            assert_eq!(self.take(r, &o), Outcome::Ready);
-        }
-    }
-
-    fn ingest(&mut self, bytes: &[u8], end: bool) {
-        let mut i: IngestIn = z();
-        i.framing = self.framing;
-        i.bytes = bytes.as_ptr();
-        i.len = bytes.len();
-        i.end = u32::from(end);
-        i.sink = self.sink();
-        let mut o: FramerOut = z();
-        let r = call(ops().ingest, self.inst, &mut i, &mut o, slot::INGEST);
-        assert_eq!(self.take(r, &o), Outcome::Ready);
-        self.drain(slot::INGEST);
-    }
-
-    fn emit(&mut self, bytes: &[u8]) {
-        let mut i: EmitIn = z();
-        i.framing = self.framing;
-        i.bytes = bytes.as_ptr();
-        i.len = bytes.len();
-        i.end_of_frame = 1;
-        i.sink = self.sink();
-        let mut o: FramerOut = z();
-        let r = call(ops().emit, self.inst, &mut i, &mut o, slot::EMIT);
-        assert_eq!(self.take(r, &o), Outcome::Ready);
-        self.drain(slot::EMIT);
-    }
-
-    fn joined(&self) -> Vec<u8> {
-        self.frames.iter().flat_map(|(b, _)| b.clone()).collect()
+    } else {
+        answer(out, Outcome::Ready, 0, 0, "")
     }
 }
+
+extern "C" fn io_read(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    // SAFETY: the carrier's `in`.
+    let i = unsafe { input.cast::<IoReadIn>().read() };
+    match with(|sc| sc.reads.remove(0)) {
+        None => answer(out, Outcome::Pending, 0, 0, ""),
+        Some(bytes) => {
+            // SAFETY: the host buffer the carrier passed through, `cap` bytes.
+            unsafe { std::ptr::copy_nonoverlapping(bytes.as_ptr(), i.buf, bytes.len()) };
+            answer(out, Outcome::Ready, 0, bytes.len() as u64, "")
+        }
+    }
+}
+
+extern "C" fn io_close(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    // SAFETY: the carrier's `in`.
+    let i = unsafe { input.cast::<HandleIn>().read() };
+    with(|sc| sc.closed.push(i.handle));
+    answer(out, Outcome::Ready, 0, 0, "")
+}
+
+extern "C" fn io_ends(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    // SAFETY: the carrier's `in`.
+    let i = unsafe { input.cast::<AddrIn>().read() };
+    let peer = b"127.0.0.1:5555";
+    // SAFETY: the address buffer, at least `MAX_ADDR`.
+    unsafe { std::ptr::copy_nonoverlapping(peer.as_ptr(), i.addr_buf, peer.len()) };
+    answer(out, Outcome::Ready, 8080, peer.len() as u64, "")
+}
+
+static IO: IoSlots = IoSlots {
+    size: size_of::<IoSlots>() as u32,
+    slots: SLOTS,
+    open: Some(io_open),
+    listen: None,
+    accept: None,
+    read: Some(io_read),
+    write: None,
+    ready: Some(io_ready),
+    shut: None,
+    close: Some(io_close),
+    spawn: None,
+    ends: Some(io_ends),
+};
+
+/// An open instance handed the scripted host, and the script reset.
+fn open(script: Script) -> (*mut c_void, Box<HostTables>) {
+    *SCRIPT.lock().unwrap() = Some(script);
+    let tables = Box::new(HostTables {
+        size: size_of::<HostTables>() as u32,
+        _reserved: 0,
+        ctx: HostCtx {
+            ptr: std::ptr::null_mut(),
+        },
+        wake: None,
+        conns: std::ptr::null(),
+        services: std::ptr::null(),
+        io: &IO,
+    });
+    let mut i: OpenIn = z();
+    i.host = &*tables;
+    let mut o: OpenOut = z();
+    let r = call(
+        ops().head.open,
+        std::ptr::null_mut(),
+        &mut i,
+        &mut o,
+        life::OPEN,
+    );
+    assert_eq!(r, Outcome::Ready);
+    (o.instance, tables)
+}
+
+fn dial(inst: *mut c_void, authority: &str) -> (Outcome, u64) {
+    let mut dest: Destination = z();
+    dest.kind = DEST_AUTHORITY;
+    dest.authority = s(authority);
+    let mut i: DialIn = z();
+    i.dest = &dest;
+    let mut o: ConnOut = z();
+    let r = call(ops().dial, inst, &mut i, &mut o, slot::DIAL);
+    (r, o.conn)
+}
+
+fn flush(inst: *mut c_void, conn: u64) -> Outcome {
+    let mut i: ConnIn = z();
+    i.conn = conn;
+    let mut o: OutHead = z();
+    call(ops().flush, inst, &mut i, &mut o, slot::FLUSH)
+}
+
+// ── the tests ────────────────────────────────────────────────────────────────────────────────────
 
 #[test]
-fn the_tail_is_the_carrier_of_the_host_socket() {
-    let st = STATEMENT;
+fn the_tail_is_a_carrier_composing_over_nothing() {
     // SAFETY: the Statement's kind tail is this crate's `'static` `TransportTail`.
-    let tail = unsafe { &*st.kind_tail.cast::<TransportTail>() };
-    // busbar ARCHITECT ruling Q128 U7: the role is stated, and tcp carries the host's byte stream.
+    let tail = unsafe { &*STATEMENT.kind_tail.cast::<TransportTail>() };
     assert_eq!(tail.role, ROLE_CARRIER);
     assert_eq!(tail.composes_over_len, 0);
     assert_eq!(check_tail(tail), Ok(()));
 }
 
 #[test]
-fn one_read_is_one_frame_byte_exact() {
-    let mut h = Host::new(64, 64, 4);
-    h.ingest(b"hello, far side", false);
+fn an_authority_resolves_to_its_dial_order_and_a_name_is_not_resolved_here() {
+    assert_eq!(resolve("127.0.0.1:80"), Some(vec!["127.0.0.1:80".into()]));
     assert_eq!(
-        h.frames,
-        vec![(b"hello, far side".to_vec(), PIECE_END_OF_FRAME)]
+        resolve("tcp://127.0.0.1:80"),
+        Some(vec!["127.0.0.1:80".into()])
     );
-    h.ingest(b"again", false);
-    assert_eq!(h.frames.len(), 2, "a second read is a second frame");
-    assert_eq!(h.joined(), b"hello, far sideagain");
-    assert_eq!(h.flags & YIELD_ENDED, 0);
+    assert_eq!(resolve("[::1]:443"), Some(vec!["[::1]:443".into()]));
+    assert_eq!(resolve("LOCALHOST:9"), Some(vec!["127.0.0.1:9".into()]));
+    assert_eq!(
+        resolve("unix:/run/x.sock"),
+        Some(vec!["unix:/run/x.sock".into()])
+    );
+    assert_eq!(resolve("example.test:80"), None);
+    assert_eq!(resolve("127.0.0.1"), None);
 }
 
 #[test]
-fn a_full_frame_sink_is_back_pressure_and_every_byte_comes_out_once() {
-    let mut h = Host::new(64, 3, 1);
-    let sent: Vec<u8> = (0..=250).collect();
-    h.ingest(&sent, false);
-    assert_eq!(h.joined(), sent, "every byte, once, in order");
-    let ends = h
-        .frames
-        .iter()
-        .filter(|(_, f)| f & PIECE_END_OF_FRAME != 0)
-        .count();
-    assert_eq!(ends, 1, "the read is one frame, ended by its last piece");
-    assert_ne!(h.frames.last().unwrap().1 & PIECE_END_OF_FRAME, 0);
-}
-
-#[test]
-fn emit_is_the_wire_and_a_full_wire_sink_is_back_pressure() {
-    let mut h = Host::new(5, 8, 1);
-    let sent: Vec<u8> = (0..=99).collect();
-    h.emit(&sent);
-    assert_eq!(h.wire_log, sent);
-    assert!(h.frames.is_empty());
-}
-
-#[test]
-fn the_far_sides_end_ends_the_connection_after_its_bytes() {
-    let mut h = Host::new(64, 2, 1);
-    h.ingest(b"last", true);
-    assert_eq!(h.joined(), b"last");
-    assert_eq!(h.flags, YIELD_ENDED);
-}
-
-#[test]
-fn encode_is_the_body_and_fields_are_refused() {
-    let mut h = Host::new(64, 8, 1);
-    let body = b"raw bytes";
-    let mut i: EncodeIn = z();
-    i.body = body.as_ptr();
-    i.body_len = body.len();
-    i.sink = h.sink();
-    let mut o: FramerOut = z();
-    let r = call(ops().encode, h.inst, &mut i, &mut o, slot::ENCODE);
+fn a_dial_opens_its_address_and_settles_under_flush() {
+    let _one = ONE.lock().unwrap();
+    let (inst, _t) = open(Script::default());
+    let (r, conn) = dial(inst, "127.0.0.1:80");
     assert_eq!(r, Outcome::Ready);
-    assert_eq!(&h.wire[..o.yielded.wire_len as usize], body);
-    let fields = [Field {
-        name: s("host"),
-        value: s("x"),
-    }];
-    i.fields = fields.as_ptr();
-    i.fields_len = 1;
-    let mut o: FramerOut = z();
-    let r = call(ops().encode, h.inst, &mut i, &mut o, slot::ENCODE);
-    assert_eq!(r, Outcome::Failed);
-    assert_eq!(o.yielded.wire_len, 0);
+    assert_eq!(flush(inst, conn), Outcome::Ready);
+    with(|sc| assert_eq!(sc.opened, ["127.0.0.1:80"]));
+    // RED: a name is refused before the host is asked to open anything.
+    let (r, _) = dial(inst, "example.test:80");
+    assert_eq!(r, Outcome::Refused);
+    with(|sc| assert_eq!(sc.opened.len(), 1));
 }
 
 #[test]
-fn locate_reads_host_and_port_and_offers_nothing() {
-    let h = Host::new(1, 1, 1);
-    for (target, want) in [
-        ("127.0.0.1:5432", "127.0.0.1:5432"),
-        ("tcp://db.internal:5432", "db.internal:5432"),
-        ("[::1]:6379", "[::1]:6379"),
-    ] {
-        let mut buf = [0_u8; 64];
-        let mut i: LocateIn = z();
-        i.target = s(target);
-        i.authority_buf = buf.as_mut_ptr();
-        i.authority_cap = buf.len();
-        let mut o: LocateOut = z();
-        let r = call(ops().locate, h.inst, &mut i, &mut o, slot::LOCATE);
-        assert_eq!(r, Outcome::Ready, "{target}");
-        assert_eq!(&buf[..o.authority_written as usize], want.as_bytes());
-        assert_eq!((o.secure, o.has_name), (0, 0));
-    }
-    let mut i: LocateIn = z();
-    i.target = s("http://x/y");
-    let mut o: LocateOut = z();
+fn a_refused_connect_answers_the_systems_words_and_closes_its_handle() {
+    let _one = ONE.lock().unwrap();
+    let (inst, _t) = open(Script {
+        fail_ready: vec![1],
+        ..Script::default()
+    });
+    let (r, conn) = dial(inst, "127.0.0.1:81");
+    assert_eq!(r, Outcome::Ready);
+    let mut i: ConnIn = z();
+    i.conn = conn;
+    let mut o: OutHead = z();
     assert_eq!(
-        call(ops().locate, h.inst, &mut i, &mut o, slot::LOCATE),
+        call(ops().flush, inst, &mut i, &mut o, slot::FLUSH),
         Outcome::Failed
     );
-    // A short authority buffer answers what it needs and writes nothing.
-    let mut buf = [0_u8; 2];
-    let mut i: LocateIn = z();
-    i.target = s("127.0.0.1:1");
-    i.authority_buf = buf.as_mut_ptr();
-    i.authority_cap = buf.len();
-    let mut o: LocateOut = z();
-    assert_eq!(
-        call(ops().locate, h.inst, &mut i, &mut o, slot::LOCATE),
-        Outcome::Failed
-    );
-    assert_eq!((o.authority_needed, o.authority_written), (11, 0));
+    assert_eq!(text(o.error), "Connection refused (os error 111)");
+    with(|sc| assert_eq!(sc.closed, [1]));
 }
 
 #[test]
-fn detach_hands_back_the_unanswered_bytes_and_adopt_answers_them_first() {
-    // A pieceless sink: the ingested bytes stay owed, unanswered.
-    let mut h = Host::new(8, 8, 0);
-    let mut i: IngestIn = z();
-    i.framing = h.framing;
-    i.bytes = b"upgrade-leftover".as_ptr();
-    i.len = 16;
-    i.sink = h.sink();
-    let mut o: FramerOut = z();
-    let r = call(ops().ingest, h.inst, &mut i, &mut o, slot::INGEST);
-    assert_eq!(h.take(r, &o), Outcome::Ready);
-    assert_eq!(h.flags, YIELD_MORE);
-    let mut left = Vec::new();
-    loop {
-        let mut i: FramingIn = z();
-        i.framing = h.framing;
-        i.sink = h.sink();
-        let mut o: FramerOut = z();
-        let r = call(ops().detach, h.inst, &mut i, &mut o, slot::DETACH);
-        assert_eq!(r, Outcome::Ready);
-        left.extend_from_slice(&h.frame[..o.yielded.frame_len as usize]);
-        if o.yielded.flags == YIELD_ENDED {
-            break;
-        }
-    }
-    assert_eq!(left, b"upgrade-leftover");
-
-    let mut g = Host::new(8, 64, 1);
-    let mut i: AdoptIn = z();
-    i.leftover = left.as_ptr();
-    i.leftover_len = left.len();
-    i.sink = g.sink();
-    let mut o: FramerOut = z();
-    let r = call(ops().adopt, g.inst, &mut i, &mut o, slot::ADOPT);
-    g.framing = o.framing;
-    assert_eq!(g.take(r, &o), Outcome::Ready);
-    assert_eq!(g.joined(), b"upgrade-leftover");
-}
-
-#[test]
-fn finish_forgets_the_framing() {
-    let mut h = Host::new(8, 8, 1);
-    let mut i: FinishIn = z();
-    i.framing = h.framing;
-    i.sink = h.sink();
-    let mut o: FramerOut = z();
-    assert_eq!(
-        call(ops().finish, h.inst, &mut i, &mut o, slot::FINISH),
-        Outcome::Ready
-    );
-    assert_eq!(o.yielded.flags, YIELD_ENDED);
-    let mut o: FramerOut = z();
-    assert_eq!(
-        call(ops().finish, h.inst, &mut i, &mut o, slot::FINISH),
-        Outcome::Failed
-    );
-}
-
-#[test]
-fn every_carrier_op_is_refused_the_socket_is_the_hosts() {
-    let h = Host::new(1, 1, 1);
+fn a_program_is_not_this_carriers_destination() {
+    let _one = ONE.lock().unwrap();
+    let (inst, _t) = open(Script::default());
+    let mut dest: Destination = z();
+    dest.kind = DEST_PROGRAM;
+    dest.program = s("/bin/cat");
     let mut i: DialIn = z();
+    i.dest = &dest;
     let mut o: ConnOut = z();
     assert_eq!(
-        call(ops().dial, h.inst, &mut i, &mut o, slot::DIAL),
+        call(ops().dial, inst, &mut i, &mut o, slot::DIAL),
+        Outcome::Refused
+    );
+    with(|sc| assert!(sc.opened.is_empty()));
+}
+
+#[test]
+fn every_read_is_a_frame_of_the_stream_a_pending_one_moves_nothing_and_shut_closes() {
+    let _one = ONE.lock().unwrap();
+    let (inst, _t) = open(Script {
+        reads: vec![None, Some(b"abc".to_vec()), Some(Vec::new())],
+        ..Script::default()
+    });
+    let (_, conn) = dial(inst, "127.0.0.1:82");
+    let mut buf = [0_u8; 16];
+    let mut read = || {
+        let mut i: ReadIn = z();
+        i.conn = conn;
+        i.buf = buf.as_mut_ptr();
+        i.cap = buf.len();
+        let mut o: IoOut = z();
+        let r = call(ops().read, inst, &mut i, &mut o, slot::READ);
+        (r, o.len, o.flags)
+    };
+    assert_eq!(read().0, Outcome::Pending);
+    let (r, len, flags) = read();
+    assert_eq!((r, len, flags), (Outcome::Ready, 3, READ_END_OF_FRAME));
+    // The clean end: no bytes, no frame.
+    assert_eq!(read(), (Outcome::Ready, 0, 0));
+    assert_eq!(&buf[..3], b"abc");
+    let mut o: IoOut = z();
+    o.len = 3;
+    o.flags = READ_END_OF_FRAME;
+    assert_eq!(check_io(&o, 16), Ok(()));
+
+    let mut i: ShutIn = z();
+    i.conn = conn;
+    let mut o: OutHead = z();
+    assert_eq!(
+        call(ops().shut, inst, &mut i, &mut o, slot::SHUT),
+        Outcome::Ready
+    );
+    with(|sc| assert_eq!(sc.closed, [1]));
+    // Idempotent: an unknown connection is already closed.
+    assert_eq!(
+        call(ops().shut, inst, &mut i, &mut o, slot::SHUT),
+        Outcome::Ready
+    );
+}
+
+#[test]
+fn arrival_answers_the_far_end_and_the_local_port() {
+    let _one = ONE.lock().unwrap();
+    let (inst, _t) = open(Script::default());
+    let (_, conn) = dial(inst, "127.0.0.1:83");
+    let mut peer = [0_u8; 64];
+    let mut i: ArrivalIn = z();
+    i.conn = conn;
+    i.peer_buf = peer.as_mut_ptr();
+    i.peer_cap = peer.len();
+    let mut o: ArrivalOut = z();
+    assert_eq!(
+        call(ops().arrival, inst, &mut i, &mut o, slot::ARRIVAL),
+        Outcome::Ready
+    );
+    assert_eq!(o.local_port, 8080);
+    assert_eq!(&peer[..o.peer_written as usize], b"127.0.0.1:5555");
+    // A short peer buffer is the short path: FAILED, the size it needs, nothing written.
+    i.peer_cap = 4;
+    let mut o: ArrivalOut = z();
+    assert_eq!(
+        call(ops().arrival, inst, &mut i, &mut o, slot::ARRIVAL),
+        Outcome::Failed
+    );
+    assert_eq!((o.peer_written, o.peer_needed), (0, 14));
+}
+
+#[test]
+fn every_framer_op_is_refused() {
+    let _one = ONE.lock().unwrap();
+    let (inst, _t) = open(Script::default());
+    let mut i: LocateIn = z();
+    let mut o: LocateOut = z();
+    assert_eq!(
+        call(ops().locate, inst, &mut i, &mut o, slot::LOCATE),
+        Outcome::Refused
+    );
+    let mut i: IngestIn = z();
+    let mut o: FramerOut = z();
+    assert_eq!(
+        call(ops().ingest, inst, &mut i, &mut o, slot::INGEST),
         Outcome::Refused
     );
 }
