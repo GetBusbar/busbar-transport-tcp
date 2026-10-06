@@ -1,0 +1,13 @@
+{
+  "settings": {},
+  "transport": {
+    "carrier": {
+      "listen": true,
+      "dial": "authority",
+      "exchange": [
+        { "write": "to the far side", "read": "to the far side" }
+      ],
+      "pending": { "write": "again", "read": "again" }
+    }
+  }
+}

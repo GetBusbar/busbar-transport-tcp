@@ -3,12 +3,13 @@
 
 //! The `tcp` transport: a byte stream, and nothing else.
 //!
-//! The socket is the host's (`BUSBAR-1.6.0.md` THE DESIGN, §5): the host dials, accepts, reads
-//! and writes it, with its readiness on the calling worker's reactor, and wraps it in connection
-//! security where a binding asks for it. This crate is the framer that sits on that socket, an
-//! IDENTITY framer ([`door`]): the bytes the far side sent are the frames, and the bytes handed to
-//! it are the wire. It opens no socket, spawns no thread and reads no clock. It knows no protocol,
-//! no plane and no principal.
+//! The socket is the host's (`BUSBAR-1.6.0.md` THE DESIGN, §5): no plugin opens a socket. This
+//! crate is the CARRIER of that stream ([`door`]): it listens, accepts, dials, reads, writes and
+//! closes through the host's I/O (`io.*`), holding only the host's opaque handles, and owns the
+//! policy over them — the dial order over an authority's addresses, the accept loop, the chunking
+//! of what it reads, how a connection closes and what its far end is. Connection security and any
+//! framing above the stream are the host's to stack on it. It spawns no thread and reads no clock.
+//! It knows no protocol, no plane and no principal.
 //!
 //! One door, two ways in: a build that links this crate names [`linked::door`]; the sibling
 //! `busbar-transport-tcp-plugin` cdylib exports the same door as its image's one symbol
@@ -30,7 +31,7 @@ mod transport;
 pub mod linked {
     /// The row's registry key.
     pub const KEY: &str = crate::door::KEY;
-    /// The layers this transport declares it can be built over: none, it frames the host's socket.
+    /// The layers this transport declares it can be built over: none, it is the bottom of its stack.
     pub const COMPOSES_OVER: &[&str] = &[];
     /// Whether this transport carries sessions.
     pub const SESSION: bool = true;
