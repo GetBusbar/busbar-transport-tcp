@@ -85,7 +85,9 @@ impl Carried {
     }
 
     fn listeners(&self) -> MutexGuard<'_, HashMap<u64, u64>> {
-        self.listeners.lock().unwrap_or_else(PoisonError::into_inner)
+        self.listeners
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
     }
 
     fn mint(&self) -> u64 {
@@ -100,9 +102,7 @@ impl Carried {
 
 /// The open instance and the host's I/O for this op, or the refusal a call on none earns.
 fn carried<'a>(i: &Instance<'a, State>) -> Result<(&'a Carried, Io<'a>), Refusal> {
-    let held = i
-        .get()
-        .ok_or_else(|| Refusal::failed("no open instance"))?;
+    let held = i.get().ok_or_else(|| Refusal::failed("no open instance"))?;
     let io = held
         .host()
         .map(|h| h.io(i.ticket()))
@@ -153,7 +153,11 @@ impl SafeSlot for Listen {
     type In = ListenIn;
     type Out = ListenOut;
     type State = State;
-    fn call(inst: Instance<'_, State>, i: Lent<'_, ListenIn>, mut o: Out<'_, ListenOut>) -> Outcome {
+    fn call(
+        inst: Instance<'_, State>,
+        i: Lent<'_, ListenIn>,
+        mut o: Out<'_, ListenOut>,
+    ) -> Outcome {
         let Ok(bind) = i.field(|x| &x.bind).as_str() else {
             return o.fail(Refusal::failed("listen: the bind address is not UTF-8"));
         };
@@ -179,7 +183,11 @@ impl SafeSlot for Accept {
     type In = AcceptIn;
     type Out = AcceptOut;
     type State = State;
-    fn call(inst: Instance<'_, State>, i: Lent<'_, AcceptIn>, mut o: Out<'_, AcceptOut>) -> Outcome {
+    fn call(
+        inst: Instance<'_, State>,
+        i: Lent<'_, AcceptIn>,
+        mut o: Out<'_, AcceptOut>,
+    ) -> Outcome {
         over!(inst, o, |c, io| {
             let Some(l) = c.listeners().get(&i.listener).copied() else {
                 return o.fail(Refusal::failed("accept: no such listener"));
@@ -422,7 +430,11 @@ impl SafeSlot for Arrival {
     type In = ArrivalIn;
     type Out = ArrivalOut;
     type State = State;
-    fn call(inst: Instance<'_, State>, i: Lent<'_, ArrivalIn>, mut o: Out<'_, ArrivalOut>) -> Outcome {
+    fn call(
+        inst: Instance<'_, State>,
+        i: Lent<'_, ArrivalIn>,
+        mut o: Out<'_, ArrivalOut>,
+    ) -> Outcome {
         over!(inst, o, |c, io| {
             let Some(h) = c.handle(i.conn) else {
                 return o.fail(Refusal::failed("arrival: no such connection"));
