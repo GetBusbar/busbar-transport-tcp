@@ -22,8 +22,8 @@ use busbar_contract::abi::mechanism::lifecycle::{slot as life, OpenIn, OpenOut};
 use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
 use busbar_contract::abi::transport::check::{check_io, check_tail};
 use busbar_contract::abi::transport::{
-    slot, ArrivalIn, ArrivalOut, ConnIn, ConnOut, Destination, DialIn, FramerOut, IngestIn,
-    IoOut, LocateIn, LocateOut, Ops, ReadIn, ShutIn, TransportTail, DEST_AUTHORITY, DEST_PROGRAM,
+    slot, ArrivalIn, ArrivalOut, ConnIn, ConnOut, Destination, DialIn, FramerOut, IngestIn, IoOut,
+    LocateIn, LocateOut, Ops, ReadIn, ShutIn, TransportTail, DEST_AUTHORITY, DEST_PROGRAM,
     READ_END_OF_FRAME, ROLE_CARRIER,
 };
 use busbar_transport_tcp::door::{door, resolve, STATEMENT};
@@ -97,7 +97,13 @@ fn with<R>(f: impl FnOnce(&mut Script) -> R) -> R {
     f(SCRIPT.lock().unwrap().get_or_insert_with(Script::default))
 }
 
-fn answer(out: *mut ServiceOut, o: Outcome, value: u64, len: u64, error: &'static str) -> RawOutcome {
+fn answer(
+    out: *mut ServiceOut,
+    o: Outcome,
+    value: u64,
+    len: u64,
+    error: &'static str,
+) -> RawOutcome {
     // SAFETY: the carrier's `out`, live for the call.
     unsafe {
         (*out).outcome = RawOutcome::of(o);
@@ -115,7 +121,13 @@ extern "C" fn io_open(_: HostCtx, input: *const c_void, out: *mut ServiceOut) ->
     with(|sc| {
         sc.opened.push(addr.clone());
         if sc.refuse_open.contains(&addr) {
-            answer(out, Outcome::Failed, 0, 0, "Connection refused (os error 111)")
+            answer(
+                out,
+                Outcome::Failed,
+                0,
+                0,
+                "Connection refused (os error 111)",
+            )
         } else {
             answer(out, Outcome::Ready, sc.opened.len() as u64, 0, "")
         }
@@ -126,7 +138,13 @@ extern "C" fn io_ready(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -
     // SAFETY: the carrier's `in`.
     let i = unsafe { input.cast::<ReadyIn>().read() };
     if with(|sc| sc.fail_ready.contains(&i.handle)) {
-        answer(out, Outcome::Failed, 0, 0, "Connection refused (os error 111)")
+        answer(
+            out,
+            Outcome::Failed,
+            0,
+            0,
+            "Connection refused (os error 111)",
+        )
     } else {
         answer(out, Outcome::Ready, 0, 0, "")
     }
@@ -193,7 +211,13 @@ fn open(script: Script) -> (*mut c_void, Box<HostTables>) {
     let mut i: OpenIn = z();
     i.host = &*tables;
     let mut o: OpenOut = z();
-    let r = call(ops().head.open, std::ptr::null_mut(), &mut i, &mut o, life::OPEN);
+    let r = call(
+        ops().head.open,
+        std::ptr::null_mut(),
+        &mut i,
+        &mut o,
+        life::OPEN,
+    );
     assert_eq!(r, Outcome::Ready);
     (o.instance, tables)
 }
@@ -230,7 +254,10 @@ fn the_tail_is_a_carrier_composing_over_nothing() {
 #[test]
 fn an_authority_resolves_to_its_dial_order_and_a_name_is_not_resolved_here() {
     assert_eq!(resolve("127.0.0.1:80"), Some(vec!["127.0.0.1:80".into()]));
-    assert_eq!(resolve("tcp://127.0.0.1:80"), Some(vec!["127.0.0.1:80".into()]));
+    assert_eq!(
+        resolve("tcp://127.0.0.1:80"),
+        Some(vec!["127.0.0.1:80".into()])
+    );
     assert_eq!(resolve("[::1]:443"), Some(vec!["[::1]:443".into()]));
     assert_eq!(resolve("LOCALHOST:9"), Some(vec!["127.0.0.1:9".into()]));
     assert_eq!(
@@ -324,10 +351,16 @@ fn every_read_is_a_frame_of_the_stream_a_pending_one_moves_nothing_and_shut_clos
     let mut i: ShutIn = z();
     i.conn = conn;
     let mut o: OutHead = z();
-    assert_eq!(call(ops().shut, inst, &mut i, &mut o, slot::SHUT), Outcome::Ready);
+    assert_eq!(
+        call(ops().shut, inst, &mut i, &mut o, slot::SHUT),
+        Outcome::Ready
+    );
     with(|sc| assert_eq!(sc.closed, [1]));
     // Idempotent: an unknown connection is already closed.
-    assert_eq!(call(ops().shut, inst, &mut i, &mut o, slot::SHUT), Outcome::Ready);
+    assert_eq!(
+        call(ops().shut, inst, &mut i, &mut o, slot::SHUT),
+        Outcome::Ready
+    );
 }
 
 #[test]
