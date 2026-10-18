@@ -3,7 +3,7 @@
 
 //! What this transport declares about itself, as the kind's own file (`BUSBAR-1.6.0.md` THE
 //! DESIGN, §2): the key it answers on and the transport kind's tail its door states. Read once at
-//! registration and sealed, so it is data, held apart from the framing code it describes.
+//! registration and sealed, so it is data, held apart from the carrier code it describes.
 
 use busbar_contract::abi::mechanism::call::AbiStr;
 use busbar_contract::abi::mechanism::door::KindTailHead;
