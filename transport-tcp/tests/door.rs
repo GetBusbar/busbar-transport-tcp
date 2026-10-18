@@ -2,7 +2,7 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The `tcp` carrier, driven through its own table the way the host drives it, over a SCRIPTED host
-//! I/O table (`abi::host::io`): the dial order over an authority's addresses, the settling of a
+//! I/O table (`abi::host::io`): the one address an authority dials, the settling of a
 //! connect, the frame bit on every read, the close, the arrival facts, and every framer op refused.
 //! (An integration test, so the crate itself stays `#![forbid(unsafe_code)]`: driving a raw table is
 //! the host's side, and needs it.) The real host's I/O is driven by busbar's conformance suite
@@ -250,18 +250,12 @@ fn the_tail_is_a_carrier_composing_over_nothing() {
 }
 
 #[test]
-fn an_authority_resolves_to_its_dial_order_and_a_name_is_not_resolved_here() {
-    assert_eq!(resolve("127.0.0.1:80"), Some(vec!["127.0.0.1:80".into()]));
-    assert_eq!(
-        resolve("tcp://127.0.0.1:80"),
-        Some(vec!["127.0.0.1:80".into()])
-    );
-    assert_eq!(resolve("[::1]:443"), Some(vec!["[::1]:443".into()]));
-    assert_eq!(resolve("LOCALHOST:9"), Some(vec!["127.0.0.1:9".into()]));
-    assert_eq!(
-        resolve("unix:/run/x.sock"),
-        Some(vec!["unix:/run/x.sock".into()])
-    );
+fn an_authority_is_its_one_address_and_a_name_is_not_resolved_here() {
+    assert_eq!(resolve("127.0.0.1:80"), Some("127.0.0.1:80".into()));
+    assert_eq!(resolve("tcp://127.0.0.1:80"), Some("127.0.0.1:80".into()));
+    assert_eq!(resolve("[::1]:443"), Some("[::1]:443".into()));
+    assert_eq!(resolve("LOCALHOST:9"), Some("127.0.0.1:9".into()));
+    assert_eq!(resolve("unix:/run/x.sock"), Some("unix:/run/x.sock".into()));
     assert_eq!(resolve("example.test:80"), None);
     assert_eq!(resolve("127.0.0.1"), None);
 }

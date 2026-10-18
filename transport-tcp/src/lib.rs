@@ -6,7 +6,7 @@
 //! The socket is the host's (`BUSBAR-1.6.0.md` THE DESIGN, §5): no plugin opens a socket. This
 //! crate is the CARRIER of that stream ([`door`]): it listens, accepts, dials, reads, writes and
 //! closes through the host's I/O (`io.*`), holding only the host's opaque handles, and owns the
-//! policy over them — the dial order over an authority's addresses, the accept loop, the chunking
+//! policy over them — one attempt at the one judged address a dial is lent, the accept loop, the chunking
 //! of what it reads, how a connection closes and what its far end is. Connection security and any
 //! framing above the stream are the host's to stack on it. It spawns no thread and reads no clock.
 //! It knows no protocol, no plane and no principal.
