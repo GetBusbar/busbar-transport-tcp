@@ -33,7 +33,7 @@ pub mod linked {
     pub const KEY: &str = crate::door::KEY;
     /// The layers this transport declares it can be built over: none, it is the bottom of its stack.
     pub const COMPOSES_OVER: &[&str] = &[];
-    /// Whether this transport carries sessions.
-    pub const SESSION: bool = true;
+    /// Whether this transport carries sessions: the claim row's own bit, read off it (one home).
+    pub const SESSION: bool = crate::claims::CLAIMS[0].session == 1;
     pub use crate::door::door;
 }
