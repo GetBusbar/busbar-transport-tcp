@@ -7,10 +7,10 @@
 //! host's opaque handles and owns the policy over them:
 //!
 //! * `listen` binds the address it is asked to, and `accept` takes each connection off it;
-//! * `dial` reads the authority it is lent (`ip:port`, `localhost:port`, `[v6]:port` or `unix:` and
-//!   an absolute path) as its ONE address — a name it does not resolve: the host's one destination
-//!   judge already pinned the address it may dial (THE DESIGN §5, "dials exactly the pinned judged
-//!   address") — and opens it, one attempt; the connect is bounded by the open the host runs it
+//! * `dial` reads the authority it is lent (`ip:port`, `[v6]:port` or `unix:` and an absolute path,
+//!   byte for byte) as its ONE address — never a name, which it does not resolve: the host's one
+//!   destination judge already pinned the address it may dial (THE DESIGN §5, "dials exactly the
+//!   pinned judged address") — and opens it, one attempt; the connect is bounded by the open the host runs it
 //!   under;
 //! * `read` answers what the socket has, straight into the host's buffer: a byte stream, so every
 //!   read completes a frame (`READ_END_OF_FRAME`); `write` hands the host what it is offered, and
@@ -213,23 +213,14 @@ impl SafeSlot for Accept {
     }
 }
 
-/// THE ADDRESS A DIAL OPENS: an IP literal (`v4:port` or `[v6]:port`) is itself; `localhost` is the
-/// IPv4 loopback; a unix-domain path is itself. A name is not resolved here: the host's one
-/// destination judge resolves and pins the address a dial may reach, and hands this carrier that
-/// pinned address.
+/// THE ADDRESS A DIAL OPENS, byte for byte: an IP literal (`v4:port` or `[v6]:port`) or a `unix:`
+/// absolute path, and nothing else. A name (`localhost` included) and a scheme prefix are not read
+/// here: the host's one destination judge resolves and pins the address a dial may reach and hands
+/// this carrier that pinned address, which the carrier dials exactly (THE DESIGN §5; CONNECTOR-19).
 #[must_use]
 pub fn resolve(authority: &str) -> Option<String> {
-    let authority = authority.strip_prefix("tcp://").unwrap_or(authority);
-    if authority.starts_with("unix:/") {
-        return Some(authority.to_owned());
-    }
-    if let Ok(at) = authority.parse::<SocketAddr>() {
-        return Some(at.to_string());
-    }
-    let (host, port) = authority.rsplit_once(':')?;
-    let port = port.parse::<u16>().ok()?;
-    host.eq_ignore_ascii_case("localhost")
-        .then(|| SocketAddr::from(([127, 0, 0, 1], port)).to_string())
+    let literal = authority.starts_with("unix:/") || authority.parse::<SocketAddr>().is_ok();
+    literal.then(|| authority.to_owned())
 }
 
 /// `dial`: the authority's one address, opened once; the connection's token at once, its connect
