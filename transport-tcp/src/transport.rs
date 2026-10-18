@@ -8,20 +8,20 @@
 //!
 //! * `listen` binds the address it is asked to, and `accept` takes each connection off it;
 //! * `dial` reads the authority it is lent (`ip:port`, `localhost:port`, `[v6]:port` or `unix:` and
-//!   an absolute path), resolves it to its addresses — a name it does not resolve: the host's one
-//!   destination judge already pinned every address it may dial — and opens them IN ORDER, one
-//!   attempt each, the next only when the one before was refused; the connect is bounded by the
-//!   open the host runs it under;
+//!   an absolute path) as its ONE address — a name it does not resolve: the host's one destination
+//!   judge already pinned the address it may dial (THE DESIGN §5, "dials exactly the pinned judged
+//!   address") — and opens it, one attempt; the connect is bounded by the open the host runs it
+//!   under;
 //! * `read` answers what the socket has, straight into the host's buffer: a byte stream, so every
 //!   read completes a frame (`READ_END_OF_FRAME`); `write` hands the host what it is offered, and
 //!   a frame's end means nothing to a stream;
-//! * `flush` settles the dial (connected, or the next address, or the refusal of the last);
+//! * `flush` settles the dial (connected, or the far end's refusal);
 //! * `shut` closes the connection whatever the reason, and forgets it; `arrival` answers the far
 //!   end's address and the local port, as the host reads them off the socket.
 //!
 //! No op holds a byte of its own: a PENDING op moved nothing, so a cancel finds nothing moved.
 
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -47,10 +47,9 @@ pub struct Carried {
     next: AtomicU64,
 }
 
-/// One connection: the host's handle, and for a dial still settling, the addresses left to try.
+/// One connection: the host's handle, and whether its dial has settled.
 struct Conn {
     io: u64,
-    rest: VecDeque<String>,
     settled: bool,
 }
 
@@ -201,7 +200,6 @@ impl SafeSlot for Accept {
                         token,
                         Conn {
                             io: h,
-                            rest: VecDeque::new(),
                             settled: true,
                         },
                     );
@@ -215,38 +213,26 @@ impl SafeSlot for Accept {
     }
 }
 
-/// THE DIAL ORDER: an authority's addresses, in the order they are tried. An IP literal (`v4:port`
-/// or `[v6]:port`) is itself; `localhost` is the IPv4 loopback; a unix-domain path is itself. A
-/// name is not resolved here: the host's one destination judge resolves and pins every address a
-/// dial may reach, and hands this carrier the pinned address.
+/// THE ADDRESS A DIAL OPENS: an IP literal (`v4:port` or `[v6]:port`) is itself; `localhost` is the
+/// IPv4 loopback; a unix-domain path is itself. A name is not resolved here: the host's one
+/// destination judge resolves and pins the address a dial may reach, and hands this carrier that
+/// pinned address.
 #[must_use]
-pub fn resolve(authority: &str) -> Option<Vec<String>> {
+pub fn resolve(authority: &str) -> Option<String> {
     let authority = authority.strip_prefix("tcp://").unwrap_or(authority);
     if authority.starts_with("unix:/") {
-        return Some(vec![authority.to_owned()]);
+        return Some(authority.to_owned());
     }
     if let Ok(at) = authority.parse::<SocketAddr>() {
-        return Some(vec![at.to_string()]);
+        return Some(at.to_string());
     }
     let (host, port) = authority.rsplit_once(':')?;
     let port = port.parse::<u16>().ok()?;
     host.eq_ignore_ascii_case("localhost")
-        .then(|| vec![SocketAddr::from(([127, 0, 0, 1], port)).to_string()])
+        .then(|| SocketAddr::from(([127, 0, 0, 1], port)).to_string())
 }
 
-/// Open the first of `rest` the host will begin, in order; the handle, or the last refusal.
-fn open_next(io: &mut Io<'_>, rest: &mut VecDeque<String>) -> Result<u64, IoFailure> {
-    let mut last = IoFailure::Refused("dial: no address to open".into());
-    while let Some(addr) = rest.pop_front() {
-        match io.open(&addr) {
-            Ok(h) => return Ok(h),
-            Err(e) => last = e,
-        }
-    }
-    Err(last)
-}
-
-/// `dial`: an authority's addresses, opened in order; the connection's token at once, its connect
+/// `dial`: the authority's one address, opened once; the connection's token at once, its connect
 /// settling under `flush`. A program is not this carrier's destination: REFUSED.
 pub struct Dial;
 impl SafeSlot for Dial {
@@ -265,21 +251,19 @@ impl SafeSlot for Dial {
         let Ok(authority) = dest.field(|d| &d.authority).as_str() else {
             return o.fail(Refusal::failed("dial: the authority is not UTF-8"));
         };
-        let Some(addrs) = resolve(authority) else {
+        let Some(addr) = resolve(authority) else {
             return o.fail(Refusal::refused(format!(
                 "`{authority}` is not an address the carrier dials without resolving a name"
             )));
         };
         over!(inst, o, |c, io| {
-            let mut rest: VecDeque<String> = addrs.into();
-            match open_next(&mut io, &mut rest) {
+            match io.open(&addr) {
                 Ok(h) => {
                     let token = c.mint();
                     c.conns().insert(
                         token,
                         Conn {
                             io: h,
-                            rest,
                             settled: false,
                         },
                     );
@@ -292,8 +276,8 @@ impl SafeSlot for Dial {
     }
 }
 
-/// `flush`: a dial settles — connected; or refused, and the next address is opened; or refused
-/// with none left, and the dial answers the far end's refusal. Nothing is held to write.
+/// `flush`: a dial settles — connected; or refused, and the dial answers the far end's refusal.
+/// Nothing is held to write.
 pub struct Flush;
 impl SafeSlot for Flush {
     type In = ConnIn;
@@ -305,47 +289,25 @@ impl SafeSlot for Flush {
         mut o: Out<'_, busbar_contract::abi::mechanism::call::OutHead>,
     ) -> Outcome {
         over!(inst, o, |c, io| {
-            loop {
-                let (h, settled) = match c.conns().get(&i.conn) {
-                    Some(conn) => (conn.io, conn.settled),
-                    None => return o.fail(Refusal::failed("flush: no such connection")),
-                };
-                if settled {
-                    return Outcome::Ready;
+            let (h, settled) = match c.conns().get(&i.conn) {
+                Some(conn) => (conn.io, conn.settled),
+                None => return o.fail(Refusal::failed("flush: no such connection")),
+            };
+            if settled {
+                return Outcome::Ready;
+            }
+            match io.ready(h, DIR_WRITE) {
+                Poll::Pending => Outcome::Pending,
+                Poll::Ready(Ok(())) => {
+                    if let Some(conn) = c.conns().get_mut(&i.conn) {
+                        conn.settled = true;
+                    }
+                    Outcome::Ready
                 }
-                match io.ready(h, DIR_WRITE) {
-                    Poll::Pending => return Outcome::Pending,
-                    Poll::Ready(Ok(())) => {
-                        if let Some(conn) = c.conns().get_mut(&i.conn) {
-                            conn.settled = true;
-                            conn.rest.clear();
-                        }
-                        return Outcome::Ready;
-                    }
-                    Poll::Ready(Err(e)) => {
-                        let _ = io.close(h);
-                        let mut rest = c
-                            .conns()
-                            .get_mut(&i.conn)
-                            .map(|conn| std::mem::take(&mut conn.rest))
-                            .unwrap_or_default();
-                        if rest.is_empty() {
-                            c.conns().remove(&i.conn);
-                            return o.fail(refusal(&e));
-                        }
-                        match open_next(&mut io, &mut rest) {
-                            Ok(next) => {
-                                if let Some(conn) = c.conns().get_mut(&i.conn) {
-                                    conn.io = next;
-                                    conn.rest = rest;
-                                }
-                            }
-                            Err(e) => {
-                                c.conns().remove(&i.conn);
-                                return o.fail(refusal(&e));
-                            }
-                        }
-                    }
+                Poll::Ready(Err(e)) => {
+                    let _ = io.close(h);
+                    c.conns().remove(&i.conn);
+                    o.fail(refusal(&e))
                 }
             }
         })
