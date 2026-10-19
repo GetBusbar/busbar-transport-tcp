@@ -266,6 +266,39 @@ fn an_authority_is_its_one_address_and_a_name_is_not_resolved_here() {
     assert_eq!(resolve("127.0.0.1"), None);
 }
 
+/// The carrier's address grammar is std's `SocketAddr` grammar, unchanged by reading it through the
+/// contract (`busbar_contract::net::is_socket_literal`, which keeps `std::net` out of the plugin's
+/// source): every row resolves exactly when std parses it.
+#[test]
+fn the_address_grammar_is_std_socket_addr_unchanged() {
+    for a in [
+        "127.0.0.1:80",
+        "0.0.0.0:0",
+        "255.255.255.255:65535",
+        "[::1]:443",
+        "[fe80::1%2]:80",
+        "[fe80::1%eth0]:80",
+        "[::ffff:127.0.0.1]:8080",
+        "::1:443",
+        "[::1]",
+        "127.0.0.1:65536",
+        "127.0.0.1:",
+        "127.1:80",
+        "0x7f.0.0.1:80",
+        "127.0.0.01:80",
+        " 127.0.0.1:80",
+        "127.0.0.1:80 ",
+        "example.test:80",
+        "",
+    ] {
+        assert_eq!(
+            resolve(a).is_some(),
+            a.parse::<std::net::SocketAddr>().is_ok(),
+            "{a:?}"
+        );
+    }
+}
+
 #[test]
 fn a_dial_opens_its_address_and_settles_under_flush() {
     let _one = ONE.lock().unwrap();

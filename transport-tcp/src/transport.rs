@@ -23,7 +23,6 @@
 
 use std::collections::HashMap;
 use std::marker::PhantomData;
-use std::net::SocketAddr;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
@@ -219,7 +218,8 @@ impl SafeSlot for Accept {
 /// this carrier that pinned address, which the carrier dials exactly (THE DESIGN §5; CONNECTOR-19).
 #[must_use]
 pub fn resolve(authority: &str) -> Option<String> {
-    let literal = authority.starts_with("unix:/") || authority.parse::<SocketAddr>().is_ok();
+    let literal =
+        authority.starts_with("unix:/") || busbar_contract::net::is_socket_literal(authority);
     literal.then(|| authority.to_owned())
 }
 
