@@ -26,6 +26,7 @@ pub(crate) const CLAIMS: &[Claim] = &[Claim {
     selector_forms: AbiStr {
         ptr: SELECTOR_CODES.as_ptr(),
         len: SELECTOR_CODES.len(),
+        ..AbiStr::ZERO
     },
     egress_selector_forms: abi_str(""),
     facts: FACTS.as_ptr(),
@@ -36,4 +37,5 @@ pub(crate) const CLAIMS: &[Claim] = &[Claim {
     unit0_trigger: UNIT0_FIRST_BYTES,
     status_at: 0,
     _reserved: 0,
+    ..Claim::ZERO
 }];

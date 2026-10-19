@@ -8,6 +8,9 @@ rust-version = "1.97"
 description = "The tcp transport: an identity framer over the host's byte stream."
 license = "Apache-2.0"
 
+[lints]
+workspace = true
+
 [lib]
 # rlib: the LINKED door (`linked::door`), which a busbar build names as a compiled-in row. The
 # dropped-in door is the sibling `busbar-transport-tcp-plugin` cdylib, which exports this same door
