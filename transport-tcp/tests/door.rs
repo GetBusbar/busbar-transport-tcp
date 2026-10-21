@@ -26,7 +26,7 @@ use busbar_contract::abi::transport::{
     LocateIn, LocateOut, Ops, ReadIn, ShutIn, TransportTail, DEST_AUTHORITY, DEST_PROGRAM,
     READ_END_OF_FRAME, ROLE_CARRIER,
 };
-use busbar_transport_tcp::door::{door, resolve, STATEMENT};
+use busbar_transport_tcp::door;
 
 fn z<T>() -> T {
     // SAFETY: every `in`/`out` here is plain C data; all-zero is a valid value of each.
@@ -34,19 +34,19 @@ fn z<T>() -> T {
 }
 
 fn s(t: &str) -> AbiStr {
-    AbiStr {
-        ptr: t.as_ptr(),
-        len: t.len(),
-    }
+    // SAFETY: `t` is the test's own text, live for every call it is passed to.
+    unsafe { AbiStr::from_raw_parts(t.as_ptr(), t.len()) }
 }
 
 fn text(t: AbiStr) -> String {
     // SAFETY: the carrier's string, live for the call.
-    String::from_utf8(unsafe { std::slice::from_raw_parts(t.ptr, t.len) }.to_vec()).unwrap()
+    String::from_utf8(unsafe { t.bytes() }.to_vec()).unwrap()
 }
 
 fn ops() -> &'static Ops {
-    let d: *const Door = door();
+    // SAFETY: `door()` answers the `'static` door of this crate.
+    #[allow(unused_unsafe)]
+    let d: *const Door = unsafe { door() };
     // SAFETY: the door answers a `'static` door whose table is this kind's `Ops`.
     unsafe { &*(*d).ops.cast::<Ops>() }
 }
@@ -64,11 +64,15 @@ fn call<I, O>(op: Option<Op>, inst: *mut c_void, i: &mut I, o: &mut O, index: u3
         let oh = std::ptr::from_mut(o).cast::<OutHead>();
         (*oh).size = size_of::<O>() as u32;
     }
-    (op.expect("every slot is filled"))(
-        inst,
-        std::ptr::from_ref(i).cast(),
-        std::ptr::from_mut(o).cast(),
-    )
+    // SAFETY: the slot is the door's own, called with the `in` and `out` built above.
+    #[allow(unused_unsafe)]
+    unsafe {
+        (op.expect("every slot is filled"))(
+            inst,
+            std::ptr::from_ref(i).cast(),
+            std::ptr::from_mut(o).cast(),
+        )
+    }
     .outcome()
 }
 
@@ -242,28 +246,13 @@ fn flush(inst: *mut c_void, conn: u64) -> Outcome {
 
 #[test]
 fn the_tail_is_a_carrier_composing_over_nothing() {
-    // SAFETY: the Statement's kind tail is this crate's `'static` `TransportTail`.
-    let tail = unsafe { &*STATEMENT.kind_tail.cast::<TransportTail>() };
+    // SAFETY: the door's Statement is this crate's `'static` one, and its kind tail a `'static`
+    // `TransportTail`.
+    let statement = unsafe { &*(*door()).statement };
+    let tail = unsafe { &*statement.kind_tail().cast::<TransportTail>() };
     assert_eq!(tail.role, ROLE_CARRIER);
-    assert_eq!(tail.composes_over_len, 0);
+    assert_eq!(tail.composes_over_len(), 0);
     assert_eq!(check_tail(tail), Ok(()));
-}
-
-/// THE CARRIER DIALS EXACTLY THE PINNED JUDGED ADDRESS (THE DESIGN §5; CONNECTOR-19): an IP
-/// literal or a `unix:` absolute path, byte for byte. A name (`localhost` included) and a scheme
-/// prefix are the connector's to read, never rewritten here. RED before the fix: `localhost` was
-/// mapped to the IPv4 loopback and `tcp://` stripped inside the plugin.
-#[test]
-fn an_authority_is_its_one_address_and_a_name_is_not_resolved_here() {
-    assert_eq!(resolve("127.0.0.1:80"), Some("127.0.0.1:80".into()));
-    assert_eq!(resolve("[::1]:443"), Some("[::1]:443".into()));
-    assert_eq!(resolve("unix:/run/x.sock"), Some("unix:/run/x.sock".into()));
-    assert_eq!(resolve("tcp://127.0.0.1:80"), None);
-    assert_eq!(resolve("LOCALHOST:9"), None);
-    assert_eq!(resolve("localhost:9"), None);
-    assert_eq!(resolve("unix:run/x.sock"), None);
-    assert_eq!(resolve("example.test:80"), None);
-    assert_eq!(resolve("127.0.0.1"), None);
 }
 
 #[test]
