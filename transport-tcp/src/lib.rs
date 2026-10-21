@@ -35,5 +35,5 @@ pub mod linked {
     pub const COMPOSES_OVER: &[&str] = &[];
     /// Whether this transport carries sessions: the claim row's own bit, read off it (one home).
     pub const SESSION: bool = crate::claims::CLAIMS[0].session == 1;
-    pub use crate::door::door;
+    pub use crate::door::{door, MACRO_DOOR};
 }
