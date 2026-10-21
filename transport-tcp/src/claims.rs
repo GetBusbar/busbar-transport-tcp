@@ -22,18 +22,14 @@ const FACTS: &[AbiStr] = &[abi_str(tfacts::PEER)];
 pub(crate) const CLAIM_NAMES: &[AbiStr] = &[abi_str(crate::meta::KEY)];
 
 /// Each claimed scheme's row, by index into [`CLAIM_NAMES`].
-pub(crate) const CLAIMS: &[Claim] = &[Claim {
-    selector_forms: AbiStr {
-        ptr: SELECTOR_CODES.as_ptr(),
-        len: SELECTOR_CODES.len(),
-    },
-    egress_selector_forms: abi_str(""),
-    facts: FACTS.as_ptr(),
-    facts_len: FACTS.len(),
-    status_namespace: crate::meta::NONE,
-    session: 1,
-    session_bound: 0,
-    unit0_trigger: UNIT0_FIRST_BYTES,
-    status_at: 0,
-    _reserved: 0,
+pub(crate) const CLAIMS: &[Claim] = &[{
+    let mut c = Claim::EMPTY.with_facts(FACTS);
+    c.selector_forms = AbiStr::of_bytes(&SELECTOR_CODES);
+    c.egress_selector_forms = abi_str("");
+    c.status_namespace = crate::meta::NONE;
+    c.session = 1;
+    c.session_bound = 0;
+    c.unit0_trigger = UNIT0_FIRST_BYTES;
+    c.status_at = 0;
+    c
 }];
