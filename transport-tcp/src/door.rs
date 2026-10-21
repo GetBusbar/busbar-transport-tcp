@@ -26,7 +26,7 @@ use crate::claims::CLAIM_NAMES;
 pub use crate::meta::KEY;
 use crate::meta::TAIL;
 pub use crate::transport::{
-    resolve, Accept, Arrival, Carried, Dial, Flush, Listen, NotAFramer, Read, Shut, Write,
+    Accept, Arrival, Carried, Dial, Flush, Listen, NotAFramer, Read, Shut, Write,
 };
 
 // ── the statement ────────────────────────────────────────────────────────────────────────────────
