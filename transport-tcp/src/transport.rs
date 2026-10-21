@@ -188,7 +188,7 @@ impl SafeSlot for Accept {
         mut o: Out<'_, AcceptOut>,
     ) -> Outcome {
         over!(inst, o, |c, io| {
-            let Some(l) = c.listeners().get(&i.listener).copied() else {
+            let Some(l) = c.listeners().get(&i.listener()).copied() else {
                 return o.fail(Refusal::failed("accept: no such listener"));
             };
             let mut peer = i.peer_buf();
@@ -234,7 +234,7 @@ impl SafeSlot for Dial {
         let Some(dest) = i.dest() else {
             return o.fail(Refusal::failed("dial: no destination"));
         };
-        if dest.kind != DEST_AUTHORITY {
+        if dest.kind() != DEST_AUTHORITY {
             return o.fail(Refusal::refused(
                 "dial: a tcp carrier reaches an authority, never a program",
             ));
@@ -280,7 +280,7 @@ impl SafeSlot for Flush {
         mut o: Out<'_, busbar_contract::abi::mechanism::call::OutHead>,
     ) -> Outcome {
         over!(inst, o, |c, io| {
-            let (h, settled) = match c.conns().get(&i.conn) {
+            let (h, settled) = match c.conns().get(&i.conn()) {
                 Some(conn) => (conn.io, conn.settled),
                 None => return o.fail(Refusal::failed("flush: no such connection")),
             };
@@ -290,14 +290,14 @@ impl SafeSlot for Flush {
             match io.ready(h, DIR_WRITE) {
                 Poll::Pending => Outcome::Pending,
                 Poll::Ready(Ok(())) => {
-                    if let Some(conn) = c.conns().get_mut(&i.conn) {
+                    if let Some(conn) = c.conns().get_mut(&i.conn()) {
                         conn.settled = true;
                     }
                     Outcome::Ready
                 }
                 Poll::Ready(Err(e)) => {
                     let _ = io.close(h);
-                    c.conns().remove(&i.conn);
+                    c.conns().remove(&i.conn());
                     o.fail(refusal(&e))
                 }
             }
@@ -313,7 +313,7 @@ impl SafeSlot for Read {
     type State = State;
     fn call(inst: Instance<'_, State>, i: Lent<'_, ReadIn>, mut o: Out<'_, IoOut>) -> Outcome {
         over!(inst, o, |c, io| {
-            let Some(h) = c.handle(i.conn) else {
+            let Some(h) = c.handle(i.conn()) else {
                 return o.fail(Refusal::failed("read: no such connection"));
             };
             let mut buf = i.buf();
@@ -341,7 +341,7 @@ impl SafeSlot for Write {
     fn call(inst: Instance<'_, State>, i: Lent<'_, WriteIn>, mut o: Out<'_, IoOut>) -> Outcome {
         let bytes = i.bytes();
         over!(inst, o, |c, io| {
-            let Some(h) = c.handle(i.conn) else {
+            let Some(h) = c.handle(i.conn()) else {
                 return o.fail(Refusal::failed("write: no such connection"));
             };
             match io.write(h, bytes) {
@@ -369,7 +369,7 @@ impl SafeSlot for Shut {
         mut o: Out<'_, busbar_contract::abi::mechanism::call::OutHead>,
     ) -> Outcome {
         over!(inst, o, |c, io| {
-            if let Some(conn) = c.conns().remove(&i.conn) {
+            if let Some(conn) = c.conns().remove(&i.conn()) {
                 let _ = io.close(conn.io);
             }
             Outcome::Ready
@@ -389,7 +389,7 @@ impl SafeSlot for Arrival {
         mut o: Out<'_, ArrivalOut>,
     ) -> Outcome {
         over!(inst, o, |c, io| {
-            let Some(h) = c.handle(i.conn) else {
+            let Some(h) = c.handle(i.conn()) else {
                 return o.fail(Refusal::failed("arrival: no such connection"));
             };
             let mut peer = [0_u8; MAX_ADDR];
