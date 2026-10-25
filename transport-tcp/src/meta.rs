@@ -13,6 +13,12 @@ use busbar_contract::abi::transport::{
 /// The claim this entry answers for.
 pub const KEY: &str = "tcp";
 
+/// The layers this carrier is built over: none, it is the bottom of its stack.
+pub(crate) const COMPOSES_OVER: &[&str] = &[];
+
+/// Whether this transport carries sessions (its claim row states `session = 1`).
+pub(crate) const SESSION: bool = true;
+
 /// The absent string: a slot this transport states nothing in.
 pub(crate) const NONE: AbiStr = AbiStr::ABSENT;
 
