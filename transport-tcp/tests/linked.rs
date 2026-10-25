@@ -14,5 +14,5 @@ fn the_linked_entry_states_the_carriers_key_layers_and_session() {
     // SAFETY: `door()` answers the `'static` door of this crate.
     #[allow(unused_unsafe)]
     let d = unsafe { (linked::door)() };
-    assert!(!d.is_null());
+    assert!(!d.ops().is_null());
 }
