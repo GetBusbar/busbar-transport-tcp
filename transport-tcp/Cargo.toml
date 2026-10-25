@@ -4,9 +4,12 @@ name = "busbar-transport-tcp"
 version = "1.6.0"
 publish = false            # a first-party plugin crate; shipped linked into busbar or as a signed tarball
 edition = "2021"
-rust-version = "1.97"
+rust-version.workspace = true
 description = "The tcp transport: an identity framer over the host's byte stream."
 license = "Apache-2.0"
+
+[lints]
+workspace = true
 
 [lib]
 # rlib: the LINKED door (`door`), which a busbar build names as a compiled-in row. The

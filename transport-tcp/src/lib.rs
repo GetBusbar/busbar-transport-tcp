@@ -16,7 +16,7 @@
 //! stack on it. It spawns no thread and reads no clock.
 //! It knows no protocol, no plane and no principal.
 //!
-//! One door, two ways in: a build that links this crate names [`door`]; the sibling
+//! One door, two ways in: a build that links this crate names [`linked::door`]; the sibling
 //! `busbar-transport-tcp-plugin` cdylib exports the same door as its image's one symbol
 //! (`export_door!`). This crate exports nothing, so linking it adds no door symbol.
 
@@ -31,8 +31,21 @@ mod door;
 mod meta;
 mod transport;
 
-/// THE DOOR: this plugin's one public item (BUSBAR-1.6.0.md l.3567, Crate shape).
+/// THE DOOR (BUSBAR-1.6.0.md l.3567, Crate shape): the one entry, linked here and exported by the
+/// dropped-in build alike.
 pub use door::door;
+
+/// THE TRANSPORT AXIS ENTRY: what the composition root folds for this transport: its key, the
+/// layers it declares and its door. The root names none of them.
+pub mod linked {
+    /// The row's registry key.
+    pub const KEY: &str = crate::meta::KEY;
+    /// The layers this transport declares it can be built over: none, it is the bottom of its stack.
+    pub const COMPOSES_OVER: &[&str] = crate::meta::COMPOSES_OVER;
+    /// Whether this transport carries sessions.
+    pub const SESSION: bool = crate::meta::SESSION;
+    pub use crate::door::{door, MACRO_DOOR};
+}
 
 #[cfg(test)]
 #[path = "tests/resolve_tests.rs"]
