@@ -17,16 +17,14 @@
 use busbar_contract::abi::mechanism::door::Statement;
 use busbar_contract::abi::sdk::door::statement;
 use busbar_contract::abi::sdk::Safe;
-use busbar_contract::abi::transport::{
-    AdoptIn, BeginIn, EmitIn, EncodeIn, FinishIn, FramerOut, FramingIn, IngestIn, LocateIn,
-    LocateOut, Ops, RefuseIn,
-};
+use busbar_contract::abi::transport::Ops;
 
 use crate::claims::CLAIM_NAMES;
 pub use crate::meta::KEY;
 use crate::meta::TAIL;
 pub use crate::transport::{
-    Accept, Arrival, Carried, Dial, Flush, Listen, NotAFramer, Read, Shut, Write,
+    Accept, Arrival, Carried, Close, Dial, Flush, Listen, NoAdopt, NoBegin, NoDetach, NoEmit,
+    NoEncode, NoFinish, NoIngest, NoLocate, NoRefuse, NoTimer, Read, Shut, Write,
 };
 
 // ── the statement ────────────────────────────────────────────────────────────────────────────────
@@ -50,7 +48,17 @@ pub const STATEMENT: Statement = {
 busbar_contract::plugin_door! {
     ops: Ops,
     statement: STATEMENT,
-    lifecycle: life(Carried),
+    lifecycle: {
+        validate: Safe<busbar_contract::abi::sdk::life::Validate<Carried>>,
+        open: Safe<busbar_contract::abi::sdk::life::Open<Carried>>,
+        refresh: Safe<busbar_contract::abi::sdk::life::Refresh<Carried>>,
+        retire: Safe<busbar_contract::abi::sdk::life::Retire<Carried>>,
+        tick: Safe<busbar_contract::abi::sdk::life::Tick<Carried>>,
+        drive: Safe<busbar_contract::abi::sdk::life::Drive<Carried>>,
+        cancel: Safe<busbar_contract::abi::sdk::life::Cancel<Carried>>,
+        release: Safe<busbar_contract::abi::sdk::life::Release<Carried>>,
+        close: Safe<Close>,
+    },
     kind_ops: {
         listen: Safe<Listen>,
         accept: Safe<Accept>,
@@ -60,15 +68,15 @@ busbar_contract::plugin_door! {
         flush: Safe<Flush>,
         shut: Safe<Shut>,
         arrival: Safe<Arrival>,
-        locate: Safe<NotAFramer<LocateIn, LocateOut>>,
-        begin: Safe<NotAFramer<BeginIn, FramerOut>>,
-        ingest: Safe<NotAFramer<IngestIn, FramerOut>>,
-        emit: Safe<NotAFramer<EmitIn, FramerOut>>,
-        encode: Safe<NotAFramer<EncodeIn, FramerOut>>,
-        refuse: Safe<NotAFramer<RefuseIn, FramerOut>>,
-        finish: Safe<NotAFramer<FinishIn, FramerOut>>,
-        detach: Safe<NotAFramer<FramingIn, FramerOut>>,
-        adopt: Safe<NotAFramer<AdoptIn, FramerOut>>,
-        timer: Safe<NotAFramer<FramingIn, FramerOut>>,
+        locate: Safe<NoLocate>,
+        begin: Safe<NoBegin>,
+        ingest: Safe<NoIngest>,
+        emit: Safe<NoEmit>,
+        encode: Safe<NoEncode>,
+        refuse: Safe<NoRefuse>,
+        finish: Safe<NoFinish>,
+        detach: Safe<NoDetach>,
+        adopt: Safe<NoAdopt>,
+        timer: Safe<NoTimer>,
     },
 }
