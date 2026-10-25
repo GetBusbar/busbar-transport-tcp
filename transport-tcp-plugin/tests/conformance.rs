@@ -10,26 +10,17 @@
 //! dial the host did not admit is refused). Every step's crossings exactly at the script's pin, the
 //! two folds equal, and the suite's RED arms kept. `plugin-ci.yml` runs it under `--release`.
 
-use busbar_plugin_loader::dispatch::{LinkedRow, LoadedDoor};
-
-/// This plugin's own door, named for the loader.
-fn loaded_door() -> LoadedDoor {
-    // SAFETY: `busbar_transport_tcp::door` is this crate's own door: it answers the `'static` door
-    // of this plugin.
-    #[allow(unused_unsafe)]
-    let loaded = unsafe { LoadedDoor::from_raw(busbar_transport_tcp::door) };
-    loaded
-}
+use busbar_plugin_loader::dispatch::LinkedRow;
 
 busbar_plugin_loader::conformance_suite! {
-    loaded: loaded_door(),
+    door: busbar_transport_tcp::door,
     cdylib: "busbar_transport_tcp_plugin",
     inputs: include_str!("conformance.json"),
 }
 
 #[test]
 fn the_statement_carries_the_declares_document() {
-    let row = LinkedRow::of_loaded(loaded_door()).unwrap();
+    let row = LinkedRow::of(busbar_transport_tcp::door).unwrap();
     let read = busbar_contract::abi::mechanism::rendering::read(&row.statement).unwrap();
     assert_eq!(
         busbar_contract::abi::mechanism::extensions::declares(&read.extensions.bytes),
