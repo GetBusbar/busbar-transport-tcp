@@ -16,15 +16,20 @@ use busbar_contract::abi::host::io::{
     AddrIn, HandleIn, IoSlots, OpenIn as IoOpenIn, ReadIn as IoReadIn, ReadyIn, SLOTS,
 };
 use busbar_contract::abi::host::service::ServiceOut;
-use busbar_contract::abi::mechanism::call::{AbiStr, InHead, Op, OutHead, Outcome, RawOutcome};
+use busbar_contract::abi::mechanism::call::{
+    AbiStr, Blob, InHead, Op, OutHead, Outcome, RawOutcome,
+};
 use busbar_contract::abi::mechanism::door::Door;
-use busbar_contract::abi::mechanism::lifecycle::{slot as life, OpenIn, OpenOut};
+use busbar_contract::abi::mechanism::lifecycle::{
+    slot as life, OpenIn, OpenOut, RefreshIn, ValidateIn,
+};
 use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
 use busbar_contract::abi::transport::check::{check_io, check_tail};
 use busbar_contract::abi::transport::{
-    slot, AdoptIn, ArrivalIn, ArrivalOut, BeginIn, ConnIn, ConnOut, Destination, DialIn, EmitIn,
-    EncodeIn, FinishIn, FramerOut, FramingIn, IngestIn, IoOut, LocateIn, LocateOut, Ops, ReadIn,
-    RefuseIn, ShutIn, TransportTail, DEST_AUTHORITY, DEST_PROGRAM, READ_END_OF_FRAME, ROLE_CARRIER,
+    slot, AcceptIn, AcceptOut, AdoptIn, ArrivalIn, ArrivalOut, BeginIn, ConnIn, ConnOut,
+    Destination, DialIn, EmitIn, EncodeIn, FinishIn, FramerOut, FramingIn, IngestIn, IoOut,
+    ListenIn, ListenOut, LocateIn, LocateOut, Ops, ReadIn, RefuseIn, ShutIn, TransportTail,
+    DEST_AUTHORITY, DEST_PROGRAM, READ_END_OF_FRAME, ROLE_CARRIER,
 };
 use busbar_transport_tcp::door;
 
@@ -95,13 +100,19 @@ struct Script {
 
 /// A host handle is never the carrier's token: the scripted host numbers its handles from here.
 const HANDLE_BASE: u64 = 100;
+/// Listener and accepted-connection handles of the scripted host.
+const LISTEN_BASE: u64 = 500;
+const ACCEPT_BASE: u64 = 700;
 
 static SCRIPT: Mutex<Option<Script>> = Mutex::new(None);
 /// One test at a time: they share the scripted host.
 static ONE: Mutex<()> = Mutex::new(());
 
 fn with<R>(f: impl FnOnce(&mut Script) -> R) -> R {
-    f(SCRIPT.lock().unwrap().get_or_insert_with(Script::default))
+    f(SCRIPT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+        .get_or_insert_with(Script::default))
 }
 
 fn answer(
@@ -177,6 +188,14 @@ extern "C" fn io_close(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -
     answer(out, Outcome::Ready, 0, 0, "")
 }
 
+extern "C" fn io_listen(_: HostCtx, _: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    answer(out, Outcome::Ready, LISTEN_BASE + 1, 0, "")
+}
+
+extern "C" fn io_accept(_: HostCtx, _: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    answer(out, Outcome::Ready, ACCEPT_BASE, 0, "")
+}
+
 extern "C" fn io_ends(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
     // SAFETY: the carrier's `in`.
     let i = unsafe { input.cast::<AddrIn>().read() };
@@ -190,8 +209,8 @@ static IO: IoSlots = IoSlots {
     size: size_of::<IoSlots>() as u32,
     slots: SLOTS,
     open: Some(io_open),
-    listen: None,
-    accept: None,
+    listen: Some(io_listen),
+    accept: Some(io_accept),
     read: Some(io_read),
     write: None,
     ready: Some(io_ready),
@@ -203,7 +222,9 @@ static IO: IoSlots = IoSlots {
 
 /// An open instance handed the scripted host, and the script reset.
 fn open(script: Script) -> (*mut c_void, Box<HostTables>) {
-    *SCRIPT.lock().unwrap() = Some(script);
+    *SCRIPT
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner) = Some(script);
     let tables = Box::new(HostTables {
         size: size_of::<HostTables>() as u32,
         _reserved: 0,
@@ -266,7 +287,9 @@ fn the_tail_is_a_carrier_composing_over_nothing() {
 
 #[test]
 fn a_dial_opens_its_address_and_settles_under_flush() {
-    let _one = ONE.lock().unwrap();
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (inst, _t) = open(Script::default());
     let (r, conn) = dial(inst, "127.0.0.1:80");
     assert_eq!(r, Outcome::Ready);
@@ -277,14 +300,16 @@ fn a_dial_opens_its_address_and_settles_under_flush() {
     assert_eq!(r, Outcome::Refused);
     assert_eq!(
         said,
-        "`example.test:80` is not an address the carrier dials without resolving a name"
+        "dial: the authority is not an IP literal or unix: path; the carrier never resolves a name"
     );
     with(|sc| assert_eq!(sc.opened.len(), 1));
 }
 
 #[test]
 fn a_refused_connect_answers_the_systems_words_and_closes_its_handle() {
-    let _one = ONE.lock().unwrap();
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (inst, _t) = open(Script {
         fail_ready: vec![HANDLE_BASE + 1],
         ..Script::default()
@@ -298,7 +323,7 @@ fn a_refused_connect_answers_the_systems_words_and_closes_its_handle() {
         call(ops().flush, inst, &mut i, &mut o, slot::FLUSH),
         Outcome::Failed
     );
-    assert_eq!(text(o.error), "Connection refused (os error 111)");
+    assert_eq!(text(o.error), "flush: Connection refused (os error 111)");
     with(|sc| assert_eq!(sc.closed, [HANDLE_BASE + 1]));
     // The refused dial was forgotten: shut closes nothing twice.
     let mut si: ShutIn = z();
@@ -313,14 +338,16 @@ fn a_refused_connect_answers_the_systems_words_and_closes_its_handle() {
 
 #[test]
 fn a_dial_the_host_does_not_admit_is_refused_in_the_hosts_words() {
-    let _one = ONE.lock().unwrap();
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (inst, _t) = open(Script {
         refuse_open: vec!["127.0.0.1:84".to_owned()],
         ..Script::default()
     });
     let (r, _, said) = dial_said(inst, "127.0.0.1:84");
     assert_eq!(r, Outcome::Refused);
-    assert_eq!(said, "not admitted for this dial");
+    assert_eq!(said, "dial: not admitted for this dial");
     // No connection was kept.
     let mut i: ConnIn = z();
     i.conn = 1;
@@ -335,7 +362,9 @@ fn a_dial_the_host_does_not_admit_is_refused_in_the_hosts_words() {
 
 #[test]
 fn a_program_is_not_this_carriers_destination() {
-    let _one = ONE.lock().unwrap();
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (inst, _t) = open(Script::default());
     let mut dest: Destination = z();
     dest.kind = DEST_PROGRAM;
@@ -356,7 +385,9 @@ fn a_program_is_not_this_carriers_destination() {
 
 #[test]
 fn every_read_is_a_frame_of_the_stream_a_pending_one_moves_nothing_and_shut_closes() {
-    let _one = ONE.lock().unwrap();
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (inst, _t) = open(Script {
         reads: vec![None, Some(b"abc".to_vec()), Some(Vec::new())],
         ..Script::default()
@@ -400,7 +431,9 @@ fn every_read_is_a_frame_of_the_stream_a_pending_one_moves_nothing_and_shut_clos
 
 #[test]
 fn arrival_answers_the_far_end_and_the_local_port() {
-    let _one = ONE.lock().unwrap();
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (inst, _t) = open(Script::default());
     let (_, conn) = dial(inst, "127.0.0.1:83");
     let mut peer = [0_u8; 64];
@@ -427,9 +460,10 @@ fn arrival_answers_the_far_end_and_the_local_port() {
 
 #[test]
 fn every_framer_op_is_refused() {
-    let _one = ONE.lock().unwrap();
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     let (inst, _t) = open(Script::default());
-    let words = "a tcp carrier frames nothing";
     let mut i: LocateIn = z();
     let mut o: LocateOut = z();
     assert_eq!(
@@ -437,7 +471,10 @@ fn every_framer_op_is_refused() {
         Outcome::Refused,
         "locate"
     );
-    assert_eq!(text(o.head.error), words, "locate");
+    assert_eq!(
+        text(o.head.error),
+        "locate: the tcp carrier does not serve this op"
+    );
     let mut i: BeginIn = z();
     let mut o: FramerOut = z();
     assert_eq!(
@@ -445,7 +482,10 @@ fn every_framer_op_is_refused() {
         Outcome::Refused,
         "begin"
     );
-    assert_eq!(text(o.head.error), words, "begin");
+    assert_eq!(
+        text(o.head.error),
+        "begin: the tcp carrier does not serve this op"
+    );
     let mut i: IngestIn = z();
     let mut o: FramerOut = z();
     assert_eq!(
@@ -453,7 +493,10 @@ fn every_framer_op_is_refused() {
         Outcome::Refused,
         "ingest"
     );
-    assert_eq!(text(o.head.error), words, "ingest");
+    assert_eq!(
+        text(o.head.error),
+        "ingest: the tcp carrier does not serve this op"
+    );
     let mut i: EmitIn = z();
     let mut o: FramerOut = z();
     assert_eq!(
@@ -461,7 +504,10 @@ fn every_framer_op_is_refused() {
         Outcome::Refused,
         "emit"
     );
-    assert_eq!(text(o.head.error), words, "emit");
+    assert_eq!(
+        text(o.head.error),
+        "emit: the tcp carrier does not serve this op"
+    );
     let mut i: EncodeIn = z();
     let mut o: FramerOut = z();
     assert_eq!(
@@ -469,7 +515,10 @@ fn every_framer_op_is_refused() {
         Outcome::Refused,
         "encode"
     );
-    assert_eq!(text(o.head.error), words, "encode");
+    assert_eq!(
+        text(o.head.error),
+        "encode: the tcp carrier does not serve this op"
+    );
     let mut i: RefuseIn = z();
     let mut o: FramerOut = z();
     assert_eq!(
@@ -477,7 +526,10 @@ fn every_framer_op_is_refused() {
         Outcome::Refused,
         "refuse"
     );
-    assert_eq!(text(o.head.error), words, "refuse");
+    assert_eq!(
+        text(o.head.error),
+        "refuse: the tcp carrier does not serve this op"
+    );
     let mut i: FinishIn = z();
     let mut o: FramerOut = z();
     assert_eq!(
@@ -485,7 +537,10 @@ fn every_framer_op_is_refused() {
         Outcome::Refused,
         "finish"
     );
-    assert_eq!(text(o.head.error), words, "finish");
+    assert_eq!(
+        text(o.head.error),
+        "finish: the tcp carrier does not serve this op"
+    );
     let mut i: FramingIn = z();
     let mut o: FramerOut = z();
     assert_eq!(
@@ -493,7 +548,10 @@ fn every_framer_op_is_refused() {
         Outcome::Refused,
         "detach"
     );
-    assert_eq!(text(o.head.error), words, "detach");
+    assert_eq!(
+        text(o.head.error),
+        "detach: the tcp carrier does not serve this op"
+    );
     let mut i: AdoptIn = z();
     let mut o: FramerOut = z();
     assert_eq!(
@@ -501,7 +559,10 @@ fn every_framer_op_is_refused() {
         Outcome::Refused,
         "adopt"
     );
-    assert_eq!(text(o.head.error), words, "adopt");
+    assert_eq!(
+        text(o.head.error),
+        "adopt: the tcp carrier does not serve this op"
+    );
     let mut i: FramingIn = z();
     let mut o: FramerOut = z();
     assert_eq!(
@@ -509,5 +570,166 @@ fn every_framer_op_is_refused() {
         Outcome::Refused,
         "timer"
     );
-    assert_eq!(text(o.head.error), words, "timer");
+    assert_eq!(
+        text(o.head.error),
+        "timer: the tcp carrier does not serve this op"
+    );
+}
+
+// ── settings, close ──────────────────────────────────────────────────────────────────────────────
+
+/// `validate` over `settings`: the outcome and the words it names.
+fn validate(settings: &'static [u8]) -> (Outcome, String) {
+    let mut err = [0_u8; 256];
+    let mut i: ValidateIn = z();
+    i.settings = Blob::of(settings);
+    i.err_buf = err.as_mut_ptr();
+    i.err_cap = err.len();
+    let mut o: OutHead = z();
+    let r = call(
+        ops().head.validate,
+        std::ptr::null_mut(),
+        &mut i,
+        &mut o,
+        life::VALIDATE,
+    );
+    (r, text(o.error))
+}
+
+fn refresh(inst: *mut c_void, settings: &'static [u8]) -> (Outcome, String) {
+    let mut i: RefreshIn = z();
+    i.settings = Blob::of(settings);
+    let mut o: OutHead = z();
+    let r = call(ops().head.refresh, inst, &mut i, &mut o, life::REFRESH);
+    (r, text(o.error))
+}
+
+#[test]
+fn tcp_declares_no_settings_so_every_key_is_refused_and_a_non_object_fails() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    assert_eq!(validate(b"").0, Outcome::Ready);
+    assert_eq!(validate(b"{}").0, Outcome::Ready);
+    assert_eq!(
+        validate(b"{\"nodelay\":true}"),
+        (
+            Outcome::Failed,
+            "settings: nodelay is not a setting this transport reads".to_owned()
+        )
+    );
+    assert_eq!(
+        validate(b"[1]"),
+        (
+            Outcome::Failed,
+            "settings: must be a JSON object".to_owned()
+        )
+    );
+    let (inst, _t) = open(Script::default());
+    assert_eq!(refresh(inst, b"{}").0, Outcome::Ready);
+    assert_eq!(
+        refresh(inst, b"{\"x\":1}"),
+        (
+            Outcome::Failed,
+            "settings: x is not a setting this transport reads".to_owned()
+        )
+    );
+    assert_eq!(
+        refresh(inst, b"7"),
+        (
+            Outcome::Failed,
+            "settings: must be a JSON object".to_owned()
+        )
+    );
+}
+
+#[test]
+fn close_closes_every_held_listener_and_connection_then_answers_ready() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (inst, _t) = open(Script::default());
+    dial(inst, "127.0.0.1:90");
+    let (_, shut_conn) = dial(inst, "127.0.0.1:91");
+    let mut so: OutHead = z();
+    let mut si: ShutIn = z();
+    si.conn = shut_conn;
+    call(ops().shut, inst, &mut si, &mut so, slot::SHUT);
+    let mut peer = [0_u8; 64];
+    let mut addr = [0_u8; 64];
+    let mut li: ListenIn = z();
+    li.bind = s("127.0.0.1:0");
+    li.addr_buf = addr.as_mut_ptr();
+    li.addr_cap = addr.len();
+    let mut lo: ListenOut = z();
+    assert_eq!(
+        call(ops().listen, inst, &mut li, &mut lo, slot::LISTEN),
+        Outcome::Ready
+    );
+    let mut ai: AcceptIn = z();
+    ai.listener = lo.listener;
+    ai.peer_buf = peer.as_mut_ptr();
+    ai.peer_cap = peer.len();
+    let mut ao: AcceptOut = z();
+    assert_eq!(
+        call(ops().accept, inst, &mut ai, &mut ao, slot::ACCEPT),
+        Outcome::Ready
+    );
+    with(|sc| assert_eq!(sc.closed, [HANDLE_BASE + 2]));
+
+    let mut ci: InHead = z();
+    let mut co: OutHead = z();
+    assert_eq!(
+        call(ops().head.close, inst, &mut ci, &mut co, life::CLOSE),
+        Outcome::Ready
+    );
+    with(|sc| {
+        let mut closed = sc.closed.clone();
+        closed.sort_unstable();
+        assert_eq!(
+            closed,
+            [
+                HANDLE_BASE + 1,
+                HANDLE_BASE + 2,
+                LISTEN_BASE + 1,
+                ACCEPT_BASE
+            ],
+            "every held handle, each once"
+        );
+    });
+}
+
+#[test]
+fn an_op_without_host_io_fails_in_words_that_name_the_op() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tables = Box::new(HostTables {
+        size: size_of::<HostTables>() as u32,
+        _reserved: 0,
+        ctx: HostCtx::NONE,
+        wake: None,
+        conns: std::ptr::null(),
+        services: std::ptr::null(),
+        io: std::ptr::null(),
+    });
+    let mut i: OpenIn = z();
+    i.host = &*tables;
+    let mut o: OpenOut = z();
+    let r = call(
+        ops().head.open,
+        std::ptr::null_mut(),
+        &mut i,
+        &mut o,
+        life::OPEN,
+    );
+    assert_eq!(r, Outcome::Ready);
+    let mut ci: ConnIn = z();
+    ci.conn = 1;
+    let mut co: OutHead = z();
+    assert_eq!(
+        call(ops().flush, o.instance, &mut ci, &mut co, slot::FLUSH),
+        Outcome::Failed
+    );
+    assert_eq!(text(co.error), "flush: the host lent this carrier no I/O");
 }
