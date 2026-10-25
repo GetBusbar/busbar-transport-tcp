@@ -139,8 +139,8 @@ impl<I: AbiIn, O: AbiOut> SafeSlot for NotAFramer<I, O> {
     type In = I;
     type Out = O;
     type State = State;
-    fn call(_: Instance<'_, State>, _: Lent<'_, I>, _: Out<'_, O>) -> Outcome {
-        Outcome::Refused
+    fn call(_: Instance<'_, State>, _: Lent<'_, I>, mut o: Out<'_, O>) -> Outcome {
+        o.fail(Refusal::refused("a tcp carrier frames nothing"))
     }
 }
 
