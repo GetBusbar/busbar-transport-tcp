@@ -22,20 +22,22 @@
 //! No op holds a byte of its own: a PENDING op moved nothing, so a cancel finds nothing moved.
 
 use std::collections::HashMap;
-use std::marker::PhantomData;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
 
 use busbar_contract::abi::mechanism::call::Outcome;
-use busbar_contract::abi::sdk::door::{AbiIn, AbiOut};
+use busbar_contract::abi::mechanism::call::{InHead, OutHead};
+use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::io::{Io, IoFailure, DIR_WRITE, MAX_ADDR};
-use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
+use busbar_contract::abi::sdk::life::{settings_object, Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::net::SocketAddr;
 use busbar_contract::abi::sdk::{Instance, Lent, Out, SafeSlot};
 use busbar_contract::abi::transport::{
-    AcceptIn, AcceptOut, ArrivalIn, ArrivalOut, ConnIn, ConnOut, DialIn, IoOut, ListenIn,
-    ListenOut, ReadIn, ShutIn, WriteIn, CANCEL_NOTHING_MOVED, DEST_AUTHORITY, READ_END_OF_FRAME,
+    AcceptIn, AcceptOut, AdoptIn, ArrivalIn, ArrivalOut, BeginIn, ConnIn, ConnOut, DialIn, EmitIn,
+    EncodeIn, FinishIn, FramerOut, FramingIn, IngestIn, IoOut, ListenIn, ListenOut, LocateIn,
+    LocateOut, ReadIn, RefuseIn, ShutIn, WriteIn, CANCEL_NOTHING_MOVED, DEST_AUTHORITY,
+    READ_END_OF_FRAME,
 };
 
 // ── the instance ─────────────────────────────────────────────────────────────────────────────────
@@ -60,12 +62,13 @@ impl Life for Carried {
     /// A PENDING carrier op moved nothing, so a cancel finds nothing moved.
     const CANCEL: u32 = CANCEL_NOTHING_MOVED;
 
-    /// This carrier reads no setting.
-    fn validate(_: &[u8]) -> Result<(), Refusal> {
-        Ok(())
+    /// This carrier reads no setting: a JSON object, and no key in it.
+    fn validate(settings: &[u8]) -> Result<(), Refusal> {
+        no_settings(settings)
     }
 
-    fn open(_: &[u8], _: &[&[u8]], _: u64) -> Result<Self, Refusal> {
+    fn open(settings: &[u8], _: &[&[u8]], _: u64) -> Result<Self, Refusal> {
+        no_settings(settings)?;
         Ok(Self {
             listeners: Mutex::new(HashMap::new()),
             conns: Mutex::new(HashMap::new()),
@@ -73,8 +76,19 @@ impl Life for Carried {
         })
     }
 
-    fn refresh(&self, _: &[u8], _: &[&[u8]], _: u64) -> Result<Refreshed, Refusal> {
+    fn refresh(&self, settings: &[u8], _: &[&[u8]], _: u64) -> Result<Refreshed, Refusal> {
+        no_settings(settings)?;
         Ok(Refreshed::default())
+    }
+}
+
+/// The settings this carrier reads: none. A JSON object (or empty), and every key refused.
+fn no_settings(settings: &[u8]) -> Result<(), Refusal> {
+    match settings_object(settings)?.keys().next() {
+        Some(key) => Err(Refusal::failed(format!(
+            "settings: {key} is not a setting this transport reads"
+        ))),
+        None => Ok(()),
     }
 }
 
@@ -100,49 +114,96 @@ impl Carried {
 }
 
 /// The open instance and the host's I/O for this op, or the refusal a call on none earns.
-fn carried<'a>(i: &Instance<'a, State>) -> Result<(&'a Carried, Io<'a>), Refusal> {
-    let held = i.get().ok_or_else(|| Refusal::failed("no open instance"))?;
+fn carried<'a>(i: &Instance<'a, State>, op: &str) -> Result<(&'a Carried, Io<'a>), Refusal> {
+    let held = i
+        .get()
+        .ok_or_else(|| Refusal::failed(format!("{op}: no open instance")))?;
     let io = held
         .host()
         .map(|h| h.io(i.ticket()))
         .filter(Io::armed)
-        .ok_or_else(|| Refusal::failed("the host lent this carrier no I/O"))?;
+        .ok_or_else(|| Refusal::failed(format!("{op}: the host lent this carrier no I/O")))?;
     Ok((held.life(), io))
 }
 
-/// The host's answer, as this op's refusal: the host's policy is REFUSED, the system's FAILED, each
-/// with the host's own words.
-fn refusal(e: &IoFailure) -> Refusal {
+/// The host's answer, as op `op`'s refusal: the host's policy is REFUSED, the system's FAILED, each
+/// with the host's own words after `<op>: `.
+fn refusal(op: &str, e: &IoFailure) -> Refusal {
     match e {
-        IoFailure::Refused(t) => Refusal::refused(t.clone()),
-        other => Refusal::failed(other.text().to_owned()),
+        IoFailure::Refused(t) => Refusal::refused(format!("{op}: {t}")),
+        other => Refusal::failed(format!("{op}: {}", other.text())),
     }
 }
 
 /// Run `body` over the instance and its I/O, failing the op without one.
 macro_rules! over {
-    ($inst:expr, $o:expr, |$c:ident, $io:ident| $body:block) => {
-        match carried(&$inst) {
+    ($op:literal, $inst:expr, $o:expr, |$c:ident, $io:ident| $body:block) => {
+        match carried(&$inst, $op) {
             Ok(($c, mut $io)) => $body,
             Err(r) => return $o.fail(r),
         }
     };
 }
 
-// ── the framer ops: refused ──────────────────────────────────────────────────────────────────────
+// ── close ────────────────────────────────────────────────────────────────────────────────────────
 
-/// A framer op: REFUSED. A carrier frames nothing (`abi::transport`: a transport fills the slots of
-/// the role it does not play with a stub that answers REFUSED).
-pub struct NotAFramer<I, O>(PhantomData<(I, O)>);
-
-impl<I: AbiIn, O: AbiOut> SafeSlot for NotAFramer<I, O> {
-    type In = I;
-    type Out = O;
+/// `close`: every host handle this instance still holds, listeners and connections, is closed
+/// through the host's I/O (errors ignored: the instance is going either way), then READY; the SDK
+/// drops the state.
+pub struct Close;
+impl SafeSlot for Close {
+    type In = InHead;
+    type Out = OutHead;
     type State = State;
-    fn call(_: Instance<'_, State>, _: Lent<'_, I>, mut o: Out<'_, O>) -> Outcome {
-        o.fail(Refusal::refused("a tcp carrier frames nothing"))
+    fn call(inst: Instance<'_, State>, _: Lent<'_, InHead>, _: Out<'_, OutHead>) -> Outcome {
+        let Some(held) = inst.get() else {
+            return Outcome::Ready;
+        };
+        let Some(mut io) = held.host().map(|h| h.io(Ticket::NONE)).filter(Io::armed) else {
+            return Outcome::Ready;
+        };
+        let life = held.life();
+        let listeners: Vec<u64> = life.listeners().drain().map(|(_, h)| h).collect();
+        let conns: Vec<u64> = life.conns().drain().map(|(_, c)| c.io).collect();
+        for h in listeners.into_iter().chain(conns) {
+            let _ = io.close(h);
+        }
+        Outcome::Ready
     }
 }
+
+// ── the framer ops: refused ──────────────────────────────────────────────────────────────────────
+
+/// One framer op's stub: REFUSED, in words that name the op (`abi::transport`: a transport fills the
+/// slots of the role it does not play with a stub that answers REFUSED). A carrier frames nothing.
+macro_rules! not_served {
+    ($name:ident, $in:ty, $out:ty, $op:literal) => {
+        #[doc = concat!("`", $op, "`: REFUSED, the tcp carrier frames nothing.")]
+        pub struct $name;
+        impl SafeSlot for $name {
+            type In = $in;
+            type Out = $out;
+            type State = State;
+            fn call(_: Instance<'_, State>, _: Lent<'_, $in>, mut o: Out<'_, $out>) -> Outcome {
+                o.fail(Refusal::refused(concat!(
+                    $op,
+                    ": the tcp carrier does not serve this op"
+                )))
+            }
+        }
+    };
+}
+
+not_served!(NoLocate, LocateIn, LocateOut, "locate");
+not_served!(NoBegin, BeginIn, FramerOut, "begin");
+not_served!(NoIngest, IngestIn, FramerOut, "ingest");
+not_served!(NoEmit, EmitIn, FramerOut, "emit");
+not_served!(NoEncode, EncodeIn, FramerOut, "encode");
+not_served!(NoRefuse, RefuseIn, FramerOut, "refuse");
+not_served!(NoFinish, FinishIn, FramerOut, "finish");
+not_served!(NoDetach, FramingIn, FramerOut, "detach");
+not_served!(NoAdopt, AdoptIn, FramerOut, "adopt");
+not_served!(NoTimer, FramingIn, FramerOut, "timer");
 
 // ── the carrier ──────────────────────────────────────────────────────────────────────────────────
 
@@ -160,7 +221,7 @@ impl SafeSlot for Listen {
         let Ok(bind) = i.bind().as_str() else {
             return o.fail(Refusal::failed("listen: the bind address is not UTF-8"));
         };
-        over!(inst, o, |c, io| {
+        over!("listen", inst, o, |c, io| {
             let mut addr = i.addr_buf();
             match io.listen_host(bind, &mut addr) {
                 Ok(h) => {
@@ -170,7 +231,7 @@ impl SafeSlot for Listen {
                     o.set(|o| &o.addr_written, addr.asked() as u64);
                     Outcome::Ready
                 }
-                Err(e) => o.fail(refusal(&e)),
+                Err(e) => o.fail(refusal("listen", &e)),
             }
         })
     }
@@ -187,7 +248,7 @@ impl SafeSlot for Accept {
         i: Lent<'_, AcceptIn>,
         mut o: Out<'_, AcceptOut>,
     ) -> Outcome {
-        over!(inst, o, |c, io| {
+        over!("accept", inst, o, |c, io| {
             let Some(l) = c.listeners().get(&i.listener()).copied() else {
                 return o.fail(Refusal::failed("accept: no such listener"));
             };
@@ -207,7 +268,7 @@ impl SafeSlot for Accept {
                     o.set(|o| &o.peer_written, peer.asked() as u64);
                     Outcome::Ready
                 }
-                Poll::Ready(Err(e)) => o.fail(refusal(&e)),
+                Poll::Ready(Err(e)) => o.fail(refusal("accept", &e)),
             }
         })
     }
@@ -243,11 +304,11 @@ impl SafeSlot for Dial {
             return o.fail(Refusal::failed("dial: the authority is not UTF-8"));
         };
         let Some(addr) = resolve(authority) else {
-            return o.fail(Refusal::refused(format!(
-                "`{authority}` is not an address the carrier dials without resolving a name"
-            )));
+            return o.fail(Refusal::refused(
+                "dial: the authority is not an IP literal or unix: path; the carrier never resolves a name",
+            ));
         };
-        over!(inst, o, |c, io| {
+        over!("dial", inst, o, |c, io| {
             match io.open(&addr) {
                 Ok(h) => {
                     let token = c.mint();
@@ -261,7 +322,7 @@ impl SafeSlot for Dial {
                     o.set(|o| &o.conn, token);
                     Outcome::Ready
                 }
-                Err(e) => o.fail(refusal(&e)),
+                Err(e) => o.fail(refusal("dial", &e)),
             }
         })
     }
@@ -279,7 +340,7 @@ impl SafeSlot for Flush {
         i: Lent<'_, ConnIn>,
         mut o: Out<'_, busbar_contract::abi::mechanism::call::OutHead>,
     ) -> Outcome {
-        over!(inst, o, |c, io| {
+        over!("flush", inst, o, |c, io| {
             let (h, settled) = match c.conns().get(&i.conn()) {
                 Some(conn) => (conn.io, conn.settled),
                 None => return o.fail(Refusal::failed("flush: no such connection")),
@@ -298,7 +359,7 @@ impl SafeSlot for Flush {
                 Poll::Ready(Err(e)) => {
                     let _ = io.close(h);
                     c.conns().remove(&i.conn());
-                    o.fail(refusal(&e))
+                    o.fail(refusal("flush", &e))
                 }
             }
         })
@@ -312,7 +373,7 @@ impl SafeSlot for Read {
     type Out = IoOut;
     type State = State;
     fn call(inst: Instance<'_, State>, i: Lent<'_, ReadIn>, mut o: Out<'_, IoOut>) -> Outcome {
-        over!(inst, o, |c, io| {
+        over!("read", inst, o, |c, io| {
             let Some(h) = c.handle(i.conn()) else {
                 return o.fail(Refusal::failed("read: no such connection"));
             };
@@ -326,7 +387,7 @@ impl SafeSlot for Read {
                     }
                     Outcome::Ready
                 }
-                Poll::Ready(Err(e)) => o.fail(refusal(&e)),
+                Poll::Ready(Err(e)) => o.fail(refusal("read", &e)),
             }
         })
     }
@@ -340,7 +401,7 @@ impl SafeSlot for Write {
     type State = State;
     fn call(inst: Instance<'_, State>, i: Lent<'_, WriteIn>, mut o: Out<'_, IoOut>) -> Outcome {
         let bytes = i.bytes();
-        over!(inst, o, |c, io| {
+        over!("write", inst, o, |c, io| {
             let Some(h) = c.handle(i.conn()) else {
                 return o.fail(Refusal::failed("write: no such connection"));
             };
@@ -350,7 +411,7 @@ impl SafeSlot for Write {
                     o.set(|o| &o.len, n as u64);
                     Outcome::Ready
                 }
-                Poll::Ready(Err(e)) => o.fail(refusal(&e)),
+                Poll::Ready(Err(e)) => o.fail(refusal("write", &e)),
             }
         })
     }
@@ -368,7 +429,7 @@ impl SafeSlot for Shut {
         i: Lent<'_, ShutIn>,
         mut o: Out<'_, busbar_contract::abi::mechanism::call::OutHead>,
     ) -> Outcome {
-        over!(inst, o, |c, io| {
+        over!("shut", inst, o, |c, io| {
             if let Some(conn) = c.conns().remove(&i.conn()) {
                 let _ = io.close(conn.io);
             }
@@ -388,7 +449,7 @@ impl SafeSlot for Arrival {
         i: Lent<'_, ArrivalIn>,
         mut o: Out<'_, ArrivalOut>,
     ) -> Outcome {
-        over!(inst, o, |c, io| {
+        over!("arrival", inst, o, |c, io| {
             let Some(h) = c.handle(i.conn()) else {
                 return o.fail(Refusal::failed("arrival: no such connection"));
             };
@@ -406,7 +467,7 @@ impl SafeSlot for Arrival {
                         o.fail(Refusal::failed("arrival: the peer buffer is too small"))
                     }
                 }
-                Err(e) => o.fail(refusal(&e)),
+                Err(e) => o.fail(refusal("arrival", &e)),
             }
         })
     }
