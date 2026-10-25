@@ -22,9 +22,9 @@ use busbar_contract::abi::mechanism::lifecycle::{slot as life, OpenIn, OpenOut};
 use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
 use busbar_contract::abi::transport::check::{check_io, check_tail};
 use busbar_contract::abi::transport::{
-    slot, ArrivalIn, ArrivalOut, ConnIn, ConnOut, Destination, DialIn, FramerOut, IngestIn, IoOut,
-    LocateIn, LocateOut, Ops, ReadIn, ShutIn, TransportTail, DEST_AUTHORITY, DEST_PROGRAM,
-    READ_END_OF_FRAME, ROLE_CARRIER,
+    slot, AdoptIn, ArrivalIn, ArrivalOut, BeginIn, ConnIn, ConnOut, Destination, DialIn, EmitIn,
+    EncodeIn, FinishIn, FramerOut, FramingIn, IngestIn, IoOut, LocateIn, LocateOut, Ops, ReadIn,
+    RefuseIn, ShutIn, TransportTail, DEST_AUTHORITY, DEST_PROGRAM, READ_END_OF_FRAME, ROLE_CARRIER,
 };
 use busbar_transport_tcp::door;
 
@@ -93,6 +93,9 @@ struct Script {
     reads: Vec<Option<Vec<u8>>>,
 }
 
+/// A host handle is never the carrier's token: the scripted host numbers its handles from here.
+const HANDLE_BASE: u64 = 100;
+
 static SCRIPT: Mutex<Option<Script>> = Mutex::new(None);
 /// One test at a time: they share the scripted host.
 static ONE: Mutex<()> = Mutex::new(());
@@ -125,15 +128,15 @@ extern "C" fn io_open(_: HostCtx, input: *const c_void, out: *mut ServiceOut) ->
     with(|sc| {
         sc.opened.push(addr.clone());
         if sc.refuse_open.contains(&addr) {
+            answer(out, Outcome::Refused, 0, 0, "not admitted for this dial")
+        } else {
             answer(
                 out,
-                Outcome::Failed,
+                Outcome::Ready,
+                HANDLE_BASE + sc.opened.len() as u64,
                 0,
-                0,
-                "Connection refused (os error 111)",
+                "",
             )
-        } else {
-            answer(out, Outcome::Ready, sc.opened.len() as u64, 0, "")
         }
     })
 }
@@ -225,6 +228,12 @@ fn open(script: Script) -> (*mut c_void, Box<HostTables>) {
 }
 
 fn dial(inst: *mut c_void, authority: &str) -> (Outcome, u64) {
+    let (r, conn, _) = dial_said(inst, authority);
+    (r, conn)
+}
+
+/// A dial, and the words its out head carries.
+fn dial_said(inst: *mut c_void, authority: &str) -> (Outcome, u64, String) {
     let mut dest: Destination = z();
     dest.kind = DEST_AUTHORITY;
     dest.authority = s(authority);
@@ -232,7 +241,7 @@ fn dial(inst: *mut c_void, authority: &str) -> (Outcome, u64) {
     i.dest = &dest;
     let mut o: ConnOut = z();
     let r = call(ops().dial, inst, &mut i, &mut o, slot::DIAL);
-    (r, o.conn)
+    (r, o.conn, text(o.head.error))
 }
 
 fn flush(inst: *mut c_void, conn: u64) -> Outcome {
@@ -264,8 +273,12 @@ fn a_dial_opens_its_address_and_settles_under_flush() {
     assert_eq!(flush(inst, conn), Outcome::Ready);
     with(|sc| assert_eq!(sc.opened, ["127.0.0.1:80"]));
     // RED: a name is refused before the host is asked to open anything.
-    let (r, _) = dial(inst, "example.test:80");
+    let (r, _, said) = dial_said(inst, "example.test:80");
     assert_eq!(r, Outcome::Refused);
+    assert_eq!(
+        said,
+        "`example.test:80` is not an address the carrier dials without resolving a name"
+    );
     with(|sc| assert_eq!(sc.opened.len(), 1));
 }
 
@@ -273,7 +286,7 @@ fn a_dial_opens_its_address_and_settles_under_flush() {
 fn a_refused_connect_answers_the_systems_words_and_closes_its_handle() {
     let _one = ONE.lock().unwrap();
     let (inst, _t) = open(Script {
-        fail_ready: vec![1],
+        fail_ready: vec![HANDLE_BASE + 1],
         ..Script::default()
     });
     let (r, conn) = dial(inst, "127.0.0.1:81");
@@ -286,7 +299,38 @@ fn a_refused_connect_answers_the_systems_words_and_closes_its_handle() {
         Outcome::Failed
     );
     assert_eq!(text(o.error), "Connection refused (os error 111)");
-    with(|sc| assert_eq!(sc.closed, [1]));
+    with(|sc| assert_eq!(sc.closed, [HANDLE_BASE + 1]));
+    // The refused dial was forgotten: shut closes nothing twice.
+    let mut si: ShutIn = z();
+    si.conn = conn;
+    let mut so: OutHead = z();
+    assert_eq!(
+        call(ops().shut, inst, &mut si, &mut so, slot::SHUT),
+        Outcome::Ready
+    );
+    with(|sc| assert_eq!(sc.closed, [HANDLE_BASE + 1]));
+}
+
+#[test]
+fn a_dial_the_host_does_not_admit_is_refused_in_the_hosts_words() {
+    let _one = ONE.lock().unwrap();
+    let (inst, _t) = open(Script {
+        refuse_open: vec!["127.0.0.1:84".to_owned()],
+        ..Script::default()
+    });
+    let (r, _, said) = dial_said(inst, "127.0.0.1:84");
+    assert_eq!(r, Outcome::Refused);
+    assert_eq!(said, "not admitted for this dial");
+    // No connection was kept.
+    let mut i: ConnIn = z();
+    i.conn = 1;
+    let mut o: OutHead = z();
+    assert_eq!(
+        call(ops().flush, inst, &mut i, &mut o, slot::FLUSH),
+        Outcome::Failed
+    );
+    assert_eq!(text(o.error), "flush: no such connection");
+    with(|sc| assert!(sc.closed.is_empty()));
 }
 
 #[test]
@@ -302,6 +346,10 @@ fn a_program_is_not_this_carriers_destination() {
     assert_eq!(
         call(ops().dial, inst, &mut i, &mut o, slot::DIAL),
         Outcome::Refused
+    );
+    assert_eq!(
+        text(o.head.error),
+        "dial: a tcp carrier reaches an authority, never a program"
     );
     with(|sc| assert!(sc.opened.is_empty()));
 }
@@ -342,7 +390,7 @@ fn every_read_is_a_frame_of_the_stream_a_pending_one_moves_nothing_and_shut_clos
         call(ops().shut, inst, &mut i, &mut o, slot::SHUT),
         Outcome::Ready
     );
-    with(|sc| assert_eq!(sc.closed, [1]));
+    with(|sc| assert_eq!(sc.closed, [HANDLE_BASE + 1]));
     // Idempotent: an unknown connection is already closed.
     assert_eq!(
         call(ops().shut, inst, &mut i, &mut o, slot::SHUT),
@@ -381,16 +429,85 @@ fn arrival_answers_the_far_end_and_the_local_port() {
 fn every_framer_op_is_refused() {
     let _one = ONE.lock().unwrap();
     let (inst, _t) = open(Script::default());
+    let words = "a tcp carrier frames nothing";
     let mut i: LocateIn = z();
     let mut o: LocateOut = z();
     assert_eq!(
         call(ops().locate, inst, &mut i, &mut o, slot::LOCATE),
-        Outcome::Refused
+        Outcome::Refused,
+        "locate"
     );
+    assert_eq!(text(o.head.error), words, "locate");
+    let mut i: BeginIn = z();
+    let mut o: FramerOut = z();
+    assert_eq!(
+        call(ops().begin, inst, &mut i, &mut o, slot::BEGIN),
+        Outcome::Refused,
+        "begin"
+    );
+    assert_eq!(text(o.head.error), words, "begin");
     let mut i: IngestIn = z();
     let mut o: FramerOut = z();
     assert_eq!(
         call(ops().ingest, inst, &mut i, &mut o, slot::INGEST),
-        Outcome::Refused
+        Outcome::Refused,
+        "ingest"
     );
+    assert_eq!(text(o.head.error), words, "ingest");
+    let mut i: EmitIn = z();
+    let mut o: FramerOut = z();
+    assert_eq!(
+        call(ops().emit, inst, &mut i, &mut o, slot::EMIT),
+        Outcome::Refused,
+        "emit"
+    );
+    assert_eq!(text(o.head.error), words, "emit");
+    let mut i: EncodeIn = z();
+    let mut o: FramerOut = z();
+    assert_eq!(
+        call(ops().encode, inst, &mut i, &mut o, slot::ENCODE),
+        Outcome::Refused,
+        "encode"
+    );
+    assert_eq!(text(o.head.error), words, "encode");
+    let mut i: RefuseIn = z();
+    let mut o: FramerOut = z();
+    assert_eq!(
+        call(ops().refuse, inst, &mut i, &mut o, slot::REFUSE),
+        Outcome::Refused,
+        "refuse"
+    );
+    assert_eq!(text(o.head.error), words, "refuse");
+    let mut i: FinishIn = z();
+    let mut o: FramerOut = z();
+    assert_eq!(
+        call(ops().finish, inst, &mut i, &mut o, slot::FINISH),
+        Outcome::Refused,
+        "finish"
+    );
+    assert_eq!(text(o.head.error), words, "finish");
+    let mut i: FramingIn = z();
+    let mut o: FramerOut = z();
+    assert_eq!(
+        call(ops().detach, inst, &mut i, &mut o, slot::DETACH),
+        Outcome::Refused,
+        "detach"
+    );
+    assert_eq!(text(o.head.error), words, "detach");
+    let mut i: AdoptIn = z();
+    let mut o: FramerOut = z();
+    assert_eq!(
+        call(ops().adopt, inst, &mut i, &mut o, slot::ADOPT),
+        Outcome::Refused,
+        "adopt"
+    );
+    assert_eq!(text(o.head.error), words, "adopt");
+    let mut i: FramingIn = z();
+    let mut o: FramerOut = z();
+    assert_eq!(
+        call(ops().timer, inst, &mut i, &mut o, slot::TIMER),
+        Outcome::Refused,
+        "timer"
+    );
+    assert_eq!(text(o.head.error), words, "timer");
 }
