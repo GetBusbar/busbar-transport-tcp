@@ -43,7 +43,7 @@ dependencies = [
 [[package]]
 name = "busbar-contract"
 version = "1.6.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=fafa9ec12c625d5315daad9da03726d7b28319e5#fafa9ec12c625d5315daad9da03726d7b28319e5"
+source = "git+https://github.com/GetBusbar/busbar?rev=1768a6e1db639389d8d1396f6d0b1e0f144adefc#1768a6e1db639389d8d1396f6d0b1e0f144adefc"
 dependencies = [
  "async-trait",
  "base64",
@@ -67,7 +67,7 @@ dependencies = [
 [[package]]
 name = "busbar-plugin-loader"
 version = "1.5.0"
-source = "git+https://github.com/GetBusbar/busbar?rev=fafa9ec12c625d5315daad9da03726d7b28319e5#fafa9ec12c625d5315daad9da03726d7b28319e5"
+source = "git+https://github.com/GetBusbar/busbar?rev=1768a6e1db639389d8d1396f6d0b1e0f144adefc#1768a6e1db639389d8d1396f6d0b1e0f144adefc"
 dependencies = [
  "busbar-contract",
  "ed25519-dalek",
@@ -714,9 +714,9 @@ checksum = "1f3ccbac311fea05f86f61904b462b55fb3df8837a366dfc601a0161d0532f20"
 
 [[package]]
 name = "tokio"
-version = "1.53.1"
+version = "1.53.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "202caea871b69668250d242070849eb495be178ed697a3e98aebce5bc81a0bed"
+checksum = "ce3335fa71841cda333a58d7615b03901380ecf09d59b3296d21f8bbac0dde4e"
 dependencies = [
  "pin-project-lite",
 ]
