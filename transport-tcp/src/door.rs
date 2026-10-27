@@ -20,9 +20,8 @@ use busbar_contract::abi::sdk::Safe;
 use busbar_contract::abi::transport::Ops;
 
 use crate::claims::CLAIM_NAMES;
-pub use crate::meta::KEY;
-use crate::meta::TAIL;
-pub use crate::transport::{
+use crate::meta::{KEY, TAIL};
+use crate::transport::{
     Accept, Arrival, Carried, Close, Dial, Flush, Listen, NoAdopt, NoBegin, NoDetach, NoEmit,
     NoEncode, NoFinish, NoIngest, NoLocate, NoRefuse, NoTimer, Read, Shut, Write,
 };
