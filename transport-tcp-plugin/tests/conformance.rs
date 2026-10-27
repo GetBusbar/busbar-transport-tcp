@@ -12,7 +12,7 @@
 
 use busbar_plugin_loader::dispatch::LinkedRow;
 
-busbar_plugin_loader::conformance_suite! {
+busbar_test_kit::conformance_suite! {
     door: busbar_transport_tcp::door,
     cdylib: "busbar_transport_tcp_plugin",
     inputs: include_str!("conformance.json"),
