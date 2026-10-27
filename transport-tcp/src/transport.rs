@@ -26,8 +26,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
 
-use busbar_contract::abi::mechanism::call::Outcome;
-use busbar_contract::abi::mechanism::call::{InHead, OutHead};
+use busbar_contract::abi::mechanism::call::{InHead, OutHead, Outcome};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::io::{Io, IoFailure, DIR_WRITE, MAX_ADDR};
 use busbar_contract::abi::sdk::life::{settings_object, Held, Life, Refreshed, Refusal};
@@ -53,6 +52,12 @@ pub struct Carried {
 struct Conn {
     io: u64,
     settled: bool,
+}
+
+impl Conn {
+    fn new(io: u64, settled: bool) -> Self {
+        Self { io, settled }
+    }
 }
 
 /// What every slot reads: the SDK's lifecycle state over [`Carried`].
@@ -257,13 +262,7 @@ impl SafeSlot for Accept {
                 Poll::Pending => Outcome::Pending,
                 Poll::Ready(Ok(h)) => {
                     let token = c.mint();
-                    c.conns().insert(
-                        token,
-                        Conn {
-                            io: h,
-                            settled: true,
-                        },
-                    );
+                    c.conns().insert(token, Conn::new(h, true));
                     o.set(|o| &o.conn, token);
                     o.set(|o| &o.peer_written, peer.asked() as u64);
                     Outcome::Ready
@@ -312,13 +311,7 @@ impl SafeSlot for Dial {
             match io.open(&addr) {
                 Ok(h) => {
                     let token = c.mint();
-                    c.conns().insert(
-                        token,
-                        Conn {
-                            io: h,
-                            settled: false,
-                        },
-                    );
+                    c.conns().insert(token, Conn::new(h, false));
                     o.set(|o| &o.conn, token);
                     Outcome::Ready
                 }
@@ -333,13 +326,9 @@ impl SafeSlot for Dial {
 pub struct Flush;
 impl SafeSlot for Flush {
     type In = ConnIn;
-    type Out = busbar_contract::abi::mechanism::call::OutHead;
+    type Out = OutHead;
     type State = State;
-    fn call(
-        inst: Instance<'_, State>,
-        i: Lent<'_, ConnIn>,
-        mut o: Out<'_, busbar_contract::abi::mechanism::call::OutHead>,
-    ) -> Outcome {
+    fn call(inst: Instance<'_, State>, i: Lent<'_, ConnIn>, mut o: Out<'_, OutHead>) -> Outcome {
         over!("flush", inst, o, |c, io| {
             let (h, settled) = match c.conns().get(&i.conn()) {
                 Some(conn) => (conn.io, conn.settled),
@@ -422,13 +411,9 @@ impl SafeSlot for Write {
 pub struct Shut;
 impl SafeSlot for Shut {
     type In = ShutIn;
-    type Out = busbar_contract::abi::mechanism::call::OutHead;
+    type Out = OutHead;
     type State = State;
-    fn call(
-        inst: Instance<'_, State>,
-        i: Lent<'_, ShutIn>,
-        mut o: Out<'_, busbar_contract::abi::mechanism::call::OutHead>,
-    ) -> Outcome {
+    fn call(inst: Instance<'_, State>, i: Lent<'_, ShutIn>, mut o: Out<'_, OutHead>) -> Outcome {
         over!("shut", inst, o, |c, io| {
             if let Some(conn) = c.conns().remove(&i.conn()) {
                 let _ = io.close(conn.io);
