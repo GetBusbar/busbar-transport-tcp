@@ -3,7 +3,7 @@
 
 //! The `tcp` transport: a byte stream, and nothing else.
 //!
-//! The socket is the host's (`BUSBAR-1.6.0.md` THE DESIGN, §5): no plugin opens a socket. This
+//! The socket is the host's: no plugin opens a socket. This
 //! crate is the CARRIER of that stream ([`door`]): it listens, accepts, dials, reads, writes and
 //! closes through the host's I/O (`io.*`), holding only the host's opaque handles under tokens it
 //! mints, and owns the policy over them: a dial reaches only an authority, never a program; it
@@ -23,20 +23,18 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-// THE KIND'S SHAPE (`BUSBAR-1.6.0.md` THE DESIGN, §2), the same files every transport twin
-// carries: what it declares (`meta`), what it claims (`claims`), the entry (`transport`), and the
-// door that states them.
+// What it declares (`meta`), what it claims (`claims`), the entry (`transport`), and the door that
+// states them.
 mod claims;
 mod door;
 mod meta;
 mod transport;
 
-/// THE DOOR (BUSBAR-1.6.0.md l.3567, Crate shape): the one entry, linked here and exported by the
-/// dropped-in build alike.
+/// The door: the one entry, linked here and exported by the dropped-in build alike.
 pub use door::door;
 
-/// THE TRANSPORT AXIS ENTRY: what the composition root folds for this transport: its key, the
-/// layers it declares and its door. The root names none of them.
+/// The transport axis entry the composition root folds for this transport: its key, the layers it
+/// declares and its door.
 pub mod linked {
     /// The row's registry key.
     pub const KEY: &str = crate::meta::KEY;
