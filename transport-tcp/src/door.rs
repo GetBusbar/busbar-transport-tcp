@@ -6,7 +6,7 @@
 //! is a [`SafeSlot`](busbar_contract::abi::sdk::SafeSlot) over the SDK's generic lifecycle
 //! (`life(Carried)`): no `unsafe` in this crate.
 //!
-//! The socket is the host's (`BUSBAR-1.6.0.md` THE DESIGN, §5): this carrier listens, accepts,
+//! The socket is the host's: this carrier listens, accepts,
 //! dials, reads, writes and closes through the host's I/O (`io.*`), holding only the host's opaque
 //! handles, and owns the policy over them ([`crate::transport`]). Every framer op (`locate` ..
 //! `timer`) is REFUSED: a carrier frames nothing.
@@ -26,10 +26,8 @@ use crate::transport::{
     NoEncode, NoFinish, NoIngest, NoLocate, NoRefuse, NoTimer, Read, Shut, Write,
 };
 
-// ── the statement ────────────────────────────────────────────────────────────────────────────────
-
 busbar_contract::statement_extensions!(
-    /// The Statement's extensions: this plugin's whole `declares` document (BUSBAR-1.6.0.md l.246).
+    /// The Statement's extensions: this plugin's whole `declares` document.
     EXTENSIONS: [(
         busbar_contract::abi::mechanism::extensions::EXT_DECLARES,
         include_bytes!("../declares.json")

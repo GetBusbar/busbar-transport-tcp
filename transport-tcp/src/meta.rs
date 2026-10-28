@@ -1,9 +1,9 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! What this transport declares about itself, as the kind's own file (`BUSBAR-1.6.0.md` THE
-//! DESIGN, §2): the key it answers on and the transport kind's tail its door states. Read once at
-//! registration and sealed, so it is data, held apart from the carrier code it describes.
+//! What this transport declares about itself: the key it answers on and the transport kind's tail
+//! its door states. Read once at registration and sealed, so it is data, held apart from the
+//! carrier code it describes.
 
 use busbar_contract::abi::mechanism::call::AbiStr;
 use busbar_contract::abi::transport::{
@@ -22,9 +22,9 @@ pub(crate) const SESSION: bool = true;
 /// The absent string: a slot this transport states nothing in.
 pub(crate) const NONE: AbiStr = AbiStr::ABSENT;
 
-/// The transport kind's tail: the CARRIER of the host's byte stream (its role stated, busbar
-/// ARCHITECT ruling Q128 U7: the connector carries a tcp need as a raw stream, frames no opening
-/// message for it, and may secure it mid-way), composing over nothing.
+/// The transport kind's tail: the CARRIER of the host's byte stream (the connector carries a tcp
+/// need as a raw stream, frames no opening message for it, and may secure it mid-way), composing
+/// over nothing.
 pub(crate) const TAIL: TransportTail = {
     let mut t = TransportTail::EMPTY.with_claim_rows(crate::claims::CLAIMS);
     t.role = ROLE_CARRIER;
