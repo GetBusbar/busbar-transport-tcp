@@ -323,7 +323,11 @@ fn a_refused_connect_answers_the_systems_words_and_closes_its_handle() {
         call(ops().flush, inst, &mut i, &mut o, slot::FLUSH),
         Outcome::Failed
     );
-    assert_eq!(text(o.error), "flush: Connection refused (os error 111)");
+    // THE SYSTEM'S WORDS, AND ONLY THEM: a plane passes a refused connect on to its caller (the a2a
+    // card fetch reads "tcp connect error: Connection refused", the agreed predev words busbar's
+    // `a_card_fetch_to_a_closed_port_fails_in_predev_words` holds), so the carrier's op name is no
+    // part of the text a caller can see.
+    assert_eq!(text(o.error), "Connection refused (os error 111)");
     with(|sc| assert_eq!(sc.closed, [HANDLE_BASE + 1]));
     // The refused dial was forgotten: shut closes nothing twice.
     let mut si: ShutIn = z();
@@ -347,7 +351,8 @@ fn a_dial_the_host_does_not_admit_is_refused_in_the_hosts_words() {
     });
     let (r, _, said) = dial_said(inst, "127.0.0.1:84");
     assert_eq!(r, Outcome::Refused);
-    assert_eq!(said, "dial: not admitted for this dial");
+    // The host's words alone: no carrier op name before them (a plane passes them on).
+    assert_eq!(said, "not admitted for this dial");
     // No connection was kept.
     let mut i: ConnIn = z();
     i.conn = 1;
