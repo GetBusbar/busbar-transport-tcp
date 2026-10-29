@@ -351,7 +351,8 @@ fn a_dial_the_host_does_not_admit_is_refused_in_the_hosts_words() {
     });
     let (r, _, said) = dial_said(inst, "127.0.0.1:84");
     assert_eq!(r, Outcome::Refused);
-    assert_eq!(said, "dial: not admitted for this dial");
+    // The host's words alone: no carrier op name before them (a plane passes them on).
+    assert_eq!(said, "not admitted for this dial");
     // No connection was kept.
     let mut i: ConnIn = z();
     i.conn = 1;
