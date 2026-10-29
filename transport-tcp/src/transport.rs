@@ -24,8 +24,9 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::{Mutex, MutexGuard, PoisonError};
 use std::task::Poll;
 
-use busbar_contract::abi::mechanism::call::{InHead, OutHead, Outcome};
+use busbar_contract::abi::mechanism::call::{OutHead, Outcome};
 use busbar_contract::abi::mechanism::ticket::Ticket;
+use busbar_contract::abi::sdk::conn::Host;
 use busbar_contract::abi::sdk::io::{Io, IoFailure, DIR_WRITE, MAX_ADDR};
 use busbar_contract::abi::sdk::life::{settings_object, Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::net::SocketAddr;
@@ -80,6 +81,20 @@ impl Life for Carried {
     fn refresh(&self, settings: &[u8], _: &[&[u8]], _: u64) -> Result<Refreshed, Refusal> {
         no_settings(settings)?;
         Ok(Refreshed::default())
+    }
+
+    /// `close`: every host handle this instance still holds, listeners and connections, is closed
+    /// through the host's I/O (errors ignored: the instance is going either way); the SDK answers
+    /// READY and drops the state.
+    fn close(&self, host: Option<&Host>) {
+        let Some(mut io) = host.map(|h| h.io(Ticket::NONE)).filter(Io::armed) else {
+            return;
+        };
+        let listeners: Vec<u64> = self.listeners().drain().map(|(_, h)| h).collect();
+        let conns: Vec<u64> = self.conns().drain().map(|(_, c)| c.io).collect();
+        for h in listeners.into_iter().chain(conns) {
+            let _ = io.close(h);
+        }
     }
 }
 
@@ -144,31 +159,6 @@ macro_rules! over {
             Err(r) => return $o.fail(r),
         }
     };
-}
-
-/// `close`: every host handle this instance still holds, listeners and connections, is closed
-/// through the host's I/O (errors ignored: the instance is going either way), then READY; the SDK
-/// drops the state.
-pub struct Close;
-impl SafeSlot for Close {
-    type In = InHead;
-    type Out = OutHead;
-    type State = State;
-    fn call(inst: Instance<'_, State>, _: Lent<'_, InHead>, _: Out<'_, OutHead>) -> Outcome {
-        let Some(held) = inst.get() else {
-            return Outcome::Ready;
-        };
-        let Some(mut io) = held.host().map(|h| h.io(Ticket::NONE)).filter(Io::armed) else {
-            return Outcome::Ready;
-        };
-        let life = held.life();
-        let listeners: Vec<u64> = life.listeners().drain().map(|(_, h)| h).collect();
-        let conns: Vec<u64> = life.conns().drain().map(|(_, c)| c.io).collect();
-        for h in listeners.into_iter().chain(conns) {
-            let _ = io.close(h);
-        }
-        Outcome::Ready
-    }
 }
 
 /// One framer op's stub: REFUSED, in words that name the op (`abi::transport`: a transport fills the
