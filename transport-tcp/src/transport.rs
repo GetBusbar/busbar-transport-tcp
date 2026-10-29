@@ -142,12 +142,14 @@ fn carried<'a>(i: &Instance<'a, State>, op: &str) -> Result<(&'a Carried, Io<'a>
     Ok((held.life(), io))
 }
 
-/// The host's answer, as op `op`'s refusal: the host's policy is REFUSED, the system's FAILED, each
-/// with the host's own words after `<op>: `.
-fn refusal(op: &str, e: &IoFailure) -> Refusal {
+/// The host's answer, as an op's refusal: the host's policy is REFUSED, the system's FAILED, each in
+/// the host's own words and nothing else. A plane passes a refused connect on to its caller (the
+/// a2a card fetch's "tcp connect error: Connection refused"), so the carrier's op name is no part of
+/// it: the host knows which op it crossed.
+fn refusal(e: &IoFailure) -> Refusal {
     match e {
-        IoFailure::Refused(t) => Refusal::refused(format!("{op}: {t}")),
-        other => Refusal::failed(format!("{op}: {}", other.text())),
+        IoFailure::Refused(t) => Refusal::refused(t.clone()),
+        other => Refusal::failed(other.text().to_owned()),
     }
 }
 
@@ -216,7 +218,7 @@ impl SafeSlot for Listen {
                     o.set(|o| &o.addr_written, addr.asked() as u64);
                     Outcome::Ready
                 }
-                Err(e) => o.fail(refusal("listen", &e)),
+                Err(e) => o.fail(refusal(&e)),
             }
         })
     }
@@ -247,7 +249,7 @@ impl SafeSlot for Accept {
                     o.set(|o| &o.peer_written, peer.asked() as u64);
                     Outcome::Ready
                 }
-                Poll::Ready(Err(e)) => o.fail(refusal("accept", &e)),
+                Poll::Ready(Err(e)) => o.fail(refusal(&e)),
             }
         })
     }
@@ -295,7 +297,7 @@ impl SafeSlot for Dial {
                     o.set(|o| &o.conn, token);
                     Outcome::Ready
                 }
-                Err(e) => o.fail(refusal("dial", &e)),
+                Err(e) => o.fail(refusal(&e)),
             }
         })
     }
@@ -328,7 +330,7 @@ impl SafeSlot for Flush {
                 Poll::Ready(Err(e)) => {
                     let _ = io.close(h);
                     c.conns().remove(&i.conn());
-                    o.fail(refusal("flush", &e))
+                    o.fail(refusal(&e))
                 }
             }
         })
@@ -356,7 +358,7 @@ impl SafeSlot for Read {
                     }
                     Outcome::Ready
                 }
-                Poll::Ready(Err(e)) => o.fail(refusal("read", &e)),
+                Poll::Ready(Err(e)) => o.fail(refusal(&e)),
             }
         })
     }
@@ -380,7 +382,7 @@ impl SafeSlot for Write {
                     o.set(|o| &o.len, n as u64);
                     Outcome::Ready
                 }
-                Poll::Ready(Err(e)) => o.fail(refusal("write", &e)),
+                Poll::Ready(Err(e)) => o.fail(refusal(&e)),
             }
         })
     }
@@ -432,7 +434,7 @@ impl SafeSlot for Arrival {
                         o.fail(Refusal::failed("arrival: the peer buffer is too small"))
                     }
                 }
-                Err(e) => o.fail(refusal("arrival", &e)),
+                Err(e) => o.fail(refusal(&e)),
             }
         })
     }
