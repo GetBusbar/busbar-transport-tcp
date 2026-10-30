@@ -5,7 +5,7 @@ version = "1.6.0"
 publish = false            # a first-party plugin crate; shipped linked into busbar or as a signed tarball
 edition = "2021"
 rust-version.workspace = true
-description = "The tcp transport: an identity framer over the host's byte stream."
+description = "The tcp transport: a carrier of the host's byte stream (listen, accept, dial, read, write; every framer op refused)."
 license = "Apache-2.0"
 
 [lints]

@@ -2,8 +2,9 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The **`tcp` transport as a droppable busbar plugin**: the `cdylib` a signed tarball of the wire
-//! carries (`kind: transport`, key `tcp`). Its logic crate's one public item, its door
-//! (`busbar_transport_tcp::door`) is exported as this image's ONE symbol,
+//! carries (`kind: transport`, key `tcp`). Its logic crate's public items are its door
+//! (`busbar_transport_tcp::door`) and the `linked` entry a linking build names (both re-exported
+//! here); the door is exported as this image's ONE symbol,
 //! `busbar_plugin_door` (`export_door!`), so the library carries exactly the door
 //! a busbar build links.
 //!

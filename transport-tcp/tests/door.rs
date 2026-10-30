@@ -13,7 +13,8 @@ use std::mem::{size_of, zeroed};
 use std::sync::Mutex;
 
 use busbar_contract::abi::host::io::{
-    AddrIn, HandleIn, IoSlots, OpenIn as IoOpenIn, ReadIn as IoReadIn, ReadyIn, SLOTS,
+    AddrIn, HandleIn, IoSlots, ListenIn as IoListenIn, OpenIn as IoOpenIn, ReadIn as IoReadIn,
+    ReadyIn, WriteIn as IoWriteIn, SLOTS,
 };
 use busbar_contract::abi::host::service::ServiceOut;
 use busbar_contract::abi::mechanism::call::{
@@ -29,7 +30,7 @@ use busbar_contract::abi::transport::{
     slot, AcceptIn, AcceptOut, AdoptIn, ArrivalIn, ArrivalOut, BeginIn, ConnIn, ConnOut,
     Destination, DialIn, EmitIn, EncodeIn, FinishIn, FramerOut, FramingIn, IngestIn, IoOut,
     ListenIn, ListenOut, LocateIn, LocateOut, Ops, ReadIn, RefuseIn, ShutIn, TransportTail,
-    DEST_AUTHORITY, DEST_PROGRAM, READ_END_OF_FRAME, ROLE_CARRIER,
+    WriteIn, DEST_AUTHORITY, DEST_PROGRAM, READ_END_OF_FRAME, ROLE_CARRIER,
 };
 use busbar_transport_tcp::door;
 
@@ -96,6 +97,26 @@ struct Script {
     closed: Vec<u64>,
     /// What `io.read` answers next: `None` = PENDING.
     reads: Vec<Option<Vec<u8>>>,
+    /// Handles whose connect is still in flight: `io.ready` answers PENDING for them.
+    ready_pending: Vec<u64>,
+    /// What `io.write` answers next: `None` = PENDING, `Some(n)` = the socket took `n` bytes.
+    writes: Vec<Option<usize>>,
+    /// Every buffer `io.write` was offered, in order.
+    offered: Vec<Vec<u8>>,
+    /// Whether `io.accept` answers PENDING (no connection ready).
+    accept_pending: bool,
+    /// An op the host fails (`"listen"`, `"accept"`, `"read"`, `"write"`, `"ends"`) with this
+    /// outcome and these words.
+    fail: Vec<(&'static str, Outcome, &'static str)>,
+}
+
+/// The address the scripted host binds, and the peer it accepts.
+const BOUND: &str = "127.0.0.1:41234";
+const PEER: &str = "10.0.0.7:4242";
+
+/// The failure the script holds for `op`, answered in the host's words.
+fn failing(op: &str, out: *mut ServiceOut) -> Option<RawOutcome> {
+    with(|sc| sc.fail.iter().find(|f| f.0 == op).copied()).map(|(_, o, w)| answer(out, o, 0, 0, w))
 }
 
 /// A host handle is never the carrier's token: the scripted host numbers its handles from here.
@@ -155,7 +176,9 @@ extern "C" fn io_open(_: HostCtx, input: *const c_void, out: *mut ServiceOut) ->
 extern "C" fn io_ready(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
     // SAFETY: the carrier's `in`.
     let i = unsafe { input.cast::<ReadyIn>().read() };
-    if with(|sc| sc.fail_ready.contains(&i.handle)) {
+    if with(|sc| sc.ready_pending.contains(&i.handle)) {
+        answer(out, Outcome::Pending, 0, 0, "")
+    } else if with(|sc| sc.fail_ready.contains(&i.handle)) {
         answer(
             out,
             Outcome::Failed,
@@ -171,6 +194,9 @@ extern "C" fn io_ready(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -
 extern "C" fn io_read(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
     // SAFETY: the carrier's `in`.
     let i = unsafe { input.cast::<IoReadIn>().read() };
+    if let Some(r) = failing("read", out) {
+        return r;
+    }
     match with(|sc| sc.reads.remove(0)) {
         None => answer(out, Outcome::Pending, 0, 0, ""),
         Some(bytes) => {
@@ -188,17 +214,54 @@ extern "C" fn io_close(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -
     answer(out, Outcome::Ready, 0, 0, "")
 }
 
-extern "C" fn io_listen(_: HostCtx, _: *const c_void, out: *mut ServiceOut) -> RawOutcome {
-    answer(out, Outcome::Ready, LISTEN_BASE + 1, 0, "")
+extern "C" fn io_listen(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    if let Some(r) = failing("listen", out) {
+        return r;
+    }
+    // SAFETY: the carrier's `in`.
+    let i = unsafe { input.cast::<IoListenIn>().read() };
+    // SAFETY: the host buffer the carrier passed through, `addr_cap` bytes.
+    unsafe { std::ptr::copy_nonoverlapping(BOUND.as_ptr(), i.addr_buf, BOUND.len()) };
+    answer(out, Outcome::Ready, LISTEN_BASE + 1, BOUND.len() as u64, "")
 }
 
-extern "C" fn io_accept(_: HostCtx, _: *const c_void, out: *mut ServiceOut) -> RawOutcome {
-    answer(out, Outcome::Ready, ACCEPT_BASE, 0, "")
+extern "C" fn io_accept(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    if let Some(r) = failing("accept", out) {
+        return r;
+    }
+    if with(|sc| sc.accept_pending) {
+        return answer(out, Outcome::Pending, 0, 0, "");
+    }
+    // SAFETY: the carrier's `in`.
+    let i = unsafe { input.cast::<AddrIn>().read() };
+    // SAFETY: the host buffer the carrier passed through, `addr_cap` bytes.
+    unsafe { std::ptr::copy_nonoverlapping(PEER.as_ptr(), i.addr_buf, PEER.len()) };
+    answer(out, Outcome::Ready, ACCEPT_BASE, PEER.len() as u64, "")
+}
+
+extern "C" fn io_write(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    if let Some(r) = failing("write", out) {
+        return r;
+    }
+    // SAFETY: the carrier's `in`.
+    let i = unsafe { input.cast::<IoWriteIn>().read() };
+    // SAFETY: the offered bytes, live for the call.
+    let bytes = unsafe { std::slice::from_raw_parts(i.bytes, i.len) }.to_vec();
+    with(|sc| {
+        sc.offered.push(bytes);
+        match sc.writes.remove(0) {
+            None => answer(out, Outcome::Pending, 0, 0, ""),
+            Some(n) => answer(out, Outcome::Ready, 0, n as u64, ""),
+        }
+    })
 }
 
 extern "C" fn io_ends(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
     // SAFETY: the carrier's `in`.
     let i = unsafe { input.cast::<AddrIn>().read() };
+    if let Some(r) = failing("ends", out) {
+        return r;
+    }
     let peer = b"127.0.0.1:5555";
     // SAFETY: the address buffer, at least `MAX_ADDR`.
     unsafe { std::ptr::copy_nonoverlapping(peer.as_ptr(), i.addr_buf, peer.len()) };
@@ -212,7 +275,7 @@ static IO: IoSlots = IoSlots {
     listen: Some(io_listen),
     accept: Some(io_accept),
     read: Some(io_read),
-    write: None,
+    write: Some(io_write),
     ready: Some(io_ready),
     shut: None,
     close: Some(io_close),
@@ -406,6 +469,10 @@ fn every_read_is_a_frame_of_the_stream_a_pending_one_moves_nothing_and_shut_clos
         i.cap = buf.len();
         let mut o: IoOut = z();
         let r = call(ops().read, inst, &mut i, &mut o, slot::READ);
+        // The contract check runs on what the carrier produced.
+        if r == Outcome::Ready {
+            assert_eq!(check_io(&o, 16), Ok(()));
+        }
         (r, o.len, o.flags)
     };
     assert_eq!(read().0, Outcome::Pending);
@@ -414,10 +481,6 @@ fn every_read_is_a_frame_of_the_stream_a_pending_one_moves_nothing_and_shut_clos
     // The clean end: no bytes, no frame.
     assert_eq!(read(), (Outcome::Ready, 0, 0));
     assert_eq!(&buf[..3], b"abc");
-    let mut o: IoOut = z();
-    o.len = 3;
-    o.flags = READ_END_OF_FRAME;
-    assert_eq!(check_io(&o, 16), Ok(()));
 
     let mut i: ShutIn = z();
     i.conn = conn;
@@ -737,4 +800,234 @@ fn an_op_without_host_io_fails_in_words_that_name_the_op() {
         Outcome::Failed
     );
     assert_eq!(text(co.error), "flush: the host lent this carrier no I/O");
+}
+
+// ── write, pending connect, addresses, and the host's errors ────────────────────────────────────
+
+fn write(inst: *mut c_void, conn: u64, bytes: &[u8]) -> (Outcome, u64, String) {
+    let mut i: WriteIn = z();
+    i.conn = conn;
+    i.bytes = bytes.as_ptr();
+    i.len = bytes.len();
+    let mut o: IoOut = z();
+    let r = call(ops().write, inst, &mut i, &mut o, slot::WRITE);
+    if r == Outcome::Ready {
+        assert_eq!(check_io(&o, bytes.len() as u64), Ok(()));
+    }
+    (r, o.len, text(o.head.error))
+}
+
+fn read(inst: *mut c_void, conn: u64) -> (Outcome, String) {
+    let mut buf = [0_u8; 16];
+    let mut i: ReadIn = z();
+    i.conn = conn;
+    i.buf = buf.as_mut_ptr();
+    i.cap = buf.len();
+    let mut o: IoOut = z();
+    let r = call(ops().read, inst, &mut i, &mut o, slot::READ);
+    (r, text(o.head.error))
+}
+
+fn listen(inst: *mut c_void, bind: &str, addr: &mut [u8]) -> (Outcome, ListenOut, String) {
+    let mut i: ListenIn = z();
+    i.bind = s(bind);
+    i.addr_buf = addr.as_mut_ptr();
+    i.addr_cap = addr.len();
+    let mut o: ListenOut = z();
+    let r = call(ops().listen, inst, &mut i, &mut o, slot::LISTEN);
+    let said = text(o.head.error);
+    (r, o, said)
+}
+
+fn accept(inst: *mut c_void, listener: u64, peer: &mut [u8]) -> (Outcome, AcceptOut, String) {
+    let mut i: AcceptIn = z();
+    i.listener = listener;
+    i.peer_buf = peer.as_mut_ptr();
+    i.peer_cap = peer.len();
+    let mut o: AcceptOut = z();
+    let r = call(ops().accept, inst, &mut i, &mut o, slot::ACCEPT);
+    let said = text(o.head.error);
+    (r, o, said)
+}
+
+#[test]
+fn a_write_answers_the_bytes_the_socket_took_whole_or_partial_and_pending_moves_nothing() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (inst, _t) = open(Script {
+        writes: vec![Some(5), Some(2), None, Some(0)],
+        ..Script::default()
+    });
+    let (_, conn) = dial(inst, "127.0.0.1:85");
+    // Whole: all five taken.
+    assert_eq!(
+        write(inst, conn, b"hello"),
+        (Outcome::Ready, 5, String::new())
+    );
+    // Partial: two of five taken; the count answered is the socket's, not the offered length.
+    assert_eq!(
+        write(inst, conn, b"world"),
+        (Outcome::Ready, 2, String::new())
+    );
+    // Pending: nothing taken.
+    assert_eq!(write(inst, conn, b"rest").0, Outcome::Pending);
+    // Zero taken is a count, not an error.
+    assert_eq!(write(inst, conn, b"x"), (Outcome::Ready, 0, String::new()));
+    with(|sc| {
+        assert_eq!(
+            sc.offered,
+            [
+                b"hello".to_vec(),
+                b"world".to_vec(),
+                b"rest".to_vec(),
+                b"x".to_vec()
+            ]
+        );
+    });
+}
+
+#[test]
+fn a_still_connecting_dial_is_pending_under_flush_then_ready_and_stays_settled() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (inst, _t) = open(Script {
+        ready_pending: vec![HANDLE_BASE + 1],
+        ..Script::default()
+    });
+    let (_, conn) = dial(inst, "127.0.0.1:86");
+    assert_eq!(flush(inst, conn), Outcome::Pending);
+    assert_eq!(flush(inst, conn), Outcome::Pending);
+    // The connect completes.
+    with(|sc| sc.ready_pending.clear());
+    assert_eq!(flush(inst, conn), Outcome::Ready);
+    // Settled: a later flush does not ask the host again (it would answer Pending).
+    with(|sc| sc.ready_pending.push(HANDLE_BASE + 1));
+    assert_eq!(flush(inst, conn), Outcome::Ready);
+    // An accepted connection is settled from the start.
+    let (mut addr, mut peer) = ([0_u8; 64], [0_u8; 64]);
+    let (_, lo, _) = listen(inst, "127.0.0.1:0", &mut addr);
+    let (_, ao, _) = accept(inst, lo.listener, &mut peer);
+    with(|sc| sc.ready_pending.push(ACCEPT_BASE));
+    assert_eq!(flush(inst, ao.conn), Outcome::Ready);
+}
+
+#[test]
+fn listen_and_accept_write_the_bound_and_peer_addresses() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (inst, _t) = open(Script::default());
+    let (mut addr, mut peer) = ([0_u8; 64], [0_u8; 64]);
+    let (r, lo, _) = listen(inst, "127.0.0.1:0", &mut addr);
+    assert_eq!(r, Outcome::Ready);
+    assert_eq!(lo.addr_written as usize, BOUND.len());
+    assert_eq!(&addr[..lo.addr_written as usize], BOUND.as_bytes());
+    let (r, ao, _) = accept(inst, lo.listener, &mut peer);
+    assert_eq!(r, Outcome::Ready);
+    assert_eq!(ao.peer_written as usize, PEER.len());
+    assert_eq!(&peer[..ao.peer_written as usize], PEER.as_bytes());
+    // The accepted connection is usable under its own token.
+    assert_ne!(ao.conn, 0);
+    assert_eq!(flush(inst, ao.conn), Outcome::Ready);
+}
+
+#[test]
+fn the_error_arms_answer_the_hosts_words_alone_and_accept_can_be_pending() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (inst, _t) = open(Script {
+        accept_pending: true,
+        ..Script::default()
+    });
+    let (mut addr, mut peer) = ([0_u8; 64], [0_u8; 64]);
+    // Unknown tokens are the carrier's own refusals, named by op.
+    let (r, _, said) = accept(inst, 99, &mut peer);
+    assert_eq!(
+        (r, said.as_str()),
+        (Outcome::Failed, "accept: no such listener")
+    );
+    assert_eq!(
+        read(inst, 99),
+        (Outcome::Failed, "read: no such connection".to_owned())
+    );
+    assert_eq!(
+        write(inst, 99, b"x"),
+        (Outcome::Failed, 0, "write: no such connection".to_owned())
+    );
+    let mut i: ArrivalIn = z();
+    i.conn = 99;
+    i.peer_buf = peer.as_mut_ptr();
+    i.peer_cap = peer.len();
+    let mut o: ArrivalOut = z();
+    assert_eq!(
+        call(ops().arrival, inst, &mut i, &mut o, slot::ARRIVAL),
+        Outcome::Failed
+    );
+    assert_eq!(text(o.head.error), "arrival: no such connection");
+    // A non-UTF-8 bind never reaches the host.
+    let bad = [0xff_u8, 0xfe];
+    let mut li: ListenIn = z();
+    li.bind = unsafe { AbiStr::from_raw_parts(bad.as_ptr(), bad.len()) };
+    li.addr_buf = addr.as_mut_ptr();
+    li.addr_cap = addr.len();
+    let mut lo: ListenOut = z();
+    assert_eq!(
+        call(ops().listen, inst, &mut li, &mut lo, slot::LISTEN),
+        Outcome::Failed
+    );
+    assert_eq!(text(lo.head.error), "listen: the bind address is not UTF-8");
+
+    // Accept with no connection ready is PENDING and moves nothing.
+    let (r, lo, _) = listen(inst, "127.0.0.1:0", &mut addr);
+    assert_eq!(r, Outcome::Ready);
+    let (r, ao, _) = accept(inst, lo.listener, &mut peer);
+    assert_eq!((r, ao.conn, ao.peer_written), (Outcome::Pending, 0, 0));
+
+    // The host's errors come back in the host's words alone, no op prefix.
+    let (_, conn) = dial(inst, "127.0.0.1:87");
+    with(|sc| {
+        sc.accept_pending = false;
+        sc.fail = vec![
+            ("accept", Outcome::Failed, "accept boom"),
+            (
+                "read",
+                Outcome::Failed,
+                "Connection reset by peer (os error 104)",
+            ),
+            ("write", Outcome::Failed, "Broken pipe (os error 32)"),
+            ("ends", Outcome::Failed, "ends boom"),
+        ];
+    });
+    let (r, _, said) = accept(inst, lo.listener, &mut peer);
+    assert_eq!((r, said.as_str()), (Outcome::Failed, "accept boom"));
+    assert_eq!(
+        read(inst, conn),
+        (
+            Outcome::Failed,
+            "Connection reset by peer (os error 104)".to_owned()
+        )
+    );
+    assert_eq!(
+        write(inst, conn, b"x"),
+        (Outcome::Failed, 0, "Broken pipe (os error 32)".to_owned())
+    );
+    let mut o: ArrivalOut = z();
+    assert_eq!(
+        call(ops().arrival, inst, &mut i, &mut o, slot::ARRIVAL),
+        Outcome::Failed
+    );
+    i.conn = conn;
+    let mut o: ArrivalOut = z();
+    assert_eq!(
+        call(ops().arrival, inst, &mut i, &mut o, slot::ARRIVAL),
+        Outcome::Failed
+    );
+    assert_eq!(text(o.head.error), "ends boom");
+    // A bind the host does not admit is REFUSED in the host's words.
+    with(|sc| sc.fail = vec![("listen", Outcome::Refused, "bind not admitted")]);
+    let (r, _, said) = listen(inst, "0.0.0.0:80", &mut addr);
+    assert_eq!((r, said.as_str()), (Outcome::Refused, "bind not admitted"));
 }
