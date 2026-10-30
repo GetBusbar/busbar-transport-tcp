@@ -23,8 +23,6 @@
 #![forbid(unsafe_code)]
 #![deny(missing_docs)]
 
-// What it declares (`meta`), what it claims (`claims`), the entry (`transport`), and the door that
-// states them.
 mod claims;
 mod door;
 mod meta;

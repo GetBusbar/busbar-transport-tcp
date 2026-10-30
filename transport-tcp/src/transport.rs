@@ -28,8 +28,9 @@ use busbar_contract::abi::mechanism::call::{OutHead, Outcome};
 use busbar_contract::abi::mechanism::ticket::Ticket;
 use busbar_contract::abi::sdk::conn::Host;
 use busbar_contract::abi::sdk::io::{Io, IoFailure, DIR_WRITE, MAX_ADDR};
-use busbar_contract::abi::sdk::life::{settings_object, Held, Life, Refreshed, Refusal};
+use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::net::SocketAddr;
+use busbar_contract::abi::sdk::transport::{carried, settings_reading};
 use busbar_contract::abi::sdk::{Instance, Lent, Out, SafeSlot};
 use busbar_contract::abi::transport::{
     AcceptIn, AcceptOut, AdoptIn, ArrivalIn, ArrivalOut, BeginIn, ConnIn, ConnOut, DialIn, EmitIn,
@@ -57,14 +58,12 @@ impl Conn {
     }
 }
 
-/// What every slot reads: the SDK's lifecycle state over [`Carried`].
 type State = Held<Carried>;
 
 impl Life for Carried {
     /// A PENDING carrier op moved nothing, so a cancel finds nothing moved.
     const CANCEL: u32 = CANCEL_NOTHING_MOVED;
 
-    /// This carrier reads no setting: a JSON object, and no key in it.
     fn validate(settings: &[u8]) -> Result<(), Refusal> {
         no_settings(settings)
     }
@@ -100,12 +99,7 @@ impl Life for Carried {
 
 /// The settings this carrier reads: none. A JSON object (or empty), and every key refused.
 fn no_settings(settings: &[u8]) -> Result<(), Refusal> {
-    match settings_object(settings)?.keys().next() {
-        Some(key) => Err(Refusal::failed(format!(
-            "settings: {key} is not a setting this transport reads"
-        ))),
-        None => Ok(()),
-    }
+    settings_reading(settings, &[]).map(drop)
 }
 
 impl Carried {
@@ -123,23 +117,9 @@ impl Carried {
         self.next.fetch_add(1, Ordering::Relaxed)
     }
 
-    /// The host handle of connection `conn`.
     fn handle(&self, conn: u64) -> Option<u64> {
         self.conns().get(&conn).map(|c| c.io)
     }
-}
-
-/// The open instance and the host's I/O for this op, or the refusal a call on none earns.
-fn carried<'a>(i: &Instance<'a, State>, op: &str) -> Result<(&'a Carried, Io<'a>), Refusal> {
-    let held = i
-        .get()
-        .ok_or_else(|| Refusal::failed(format!("{op}: no open instance")))?;
-    let io = held
-        .host()
-        .map(|h| h.io(i.ticket()))
-        .filter(Io::armed)
-        .ok_or_else(|| Refusal::failed(format!("{op}: the host lent this carrier no I/O")))?;
-    Ok((held.life(), io))
 }
 
 /// The host's answer, as an op's refusal: the host's policy is REFUSED, the system's FAILED, each in
@@ -153,7 +133,7 @@ fn refusal(e: &IoFailure) -> Refusal {
     }
 }
 
-/// Run `body` over the instance and its I/O, failing the op without one.
+/// Run `body` over the instance and its I/O ([`carried`]), failing the op without one.
 macro_rules! over {
     ($op:literal, $inst:expr, $o:expr, |$c:ident, $io:ident| $body:block) => {
         match carried(&$inst, $op) {
@@ -163,36 +143,19 @@ macro_rules! over {
     };
 }
 
-/// One framer op's stub: REFUSED, in words that name the op (`abi::transport`: a transport fills the
-/// slots of the role it does not play with a stub that answers REFUSED). A carrier frames nothing.
-macro_rules! not_served {
-    ($name:ident, $in:ty, $out:ty, $op:literal) => {
-        #[doc = concat!("`", $op, "`: REFUSED, the tcp carrier frames nothing.")]
-        pub struct $name;
-        impl SafeSlot for $name {
-            type In = $in;
-            type Out = $out;
-            type State = State;
-            fn call(_: Instance<'_, State>, _: Lent<'_, $in>, mut o: Out<'_, $out>) -> Outcome {
-                o.fail(Refusal::refused(concat!(
-                    $op,
-                    ": the tcp carrier does not serve this op"
-                )))
-            }
-        }
-    };
+busbar_contract::not_served! {
+    state: State, role: "tcp carrier";
+    NoLocate(LocateIn => LocateOut) "locate";
+    NoBegin(BeginIn => FramerOut) "begin";
+    NoIngest(IngestIn => FramerOut) "ingest";
+    NoEmit(EmitIn => FramerOut) "emit";
+    NoEncode(EncodeIn => FramerOut) "encode";
+    NoRefuse(RefuseIn => FramerOut) "refuse";
+    NoFinish(FinishIn => FramerOut) "finish";
+    NoDetach(FramingIn => FramerOut) "detach";
+    NoAdopt(AdoptIn => FramerOut) "adopt";
+    NoTimer(FramingIn => FramerOut) "timer";
 }
-
-not_served!(NoLocate, LocateIn, LocateOut, "locate");
-not_served!(NoBegin, BeginIn, FramerOut, "begin");
-not_served!(NoIngest, IngestIn, FramerOut, "ingest");
-not_served!(NoEmit, EmitIn, FramerOut, "emit");
-not_served!(NoEncode, EncodeIn, FramerOut, "encode");
-not_served!(NoRefuse, RefuseIn, FramerOut, "refuse");
-not_served!(NoFinish, FinishIn, FramerOut, "finish");
-not_served!(NoDetach, FramingIn, FramerOut, "detach");
-not_served!(NoAdopt, AdoptIn, FramerOut, "adopt");
-not_served!(NoTimer, FramingIn, FramerOut, "timer");
 
 /// `listen`: bind the address, and answer the address bound into the host's buffer.
 pub struct Listen;
