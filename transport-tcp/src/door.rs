@@ -10,9 +10,6 @@
 //! dials, reads, writes and closes through the host's I/O (`io.*`), holding only the host's opaque
 //! handles, and owns the policy over them ([`crate::transport`]). Every framer op (`locate` ..
 //! `timer`) is REFUSED: a carrier frames nothing.
-//!
-//! The door wires the kind's own files together: the key and tail [`crate::meta`] declares, the
-//! claims [`crate::claims`] declares, and the carrier [`crate::transport`] runs.
 
 use busbar_contract::abi::mechanism::door::Statement;
 use busbar_contract::abi::sdk::door::statement;

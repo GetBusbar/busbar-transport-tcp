@@ -5,7 +5,6 @@
 //! its door states. Read once at registration and sealed, so it is data, held apart from the
 //! carrier code it describes.
 
-use busbar_contract::abi::mechanism::call::AbiStr;
 use busbar_contract::abi::transport::{
     TransportTail, FRAME_PIECE_SIZE, FRAMING_STREAM, ROLE_CARRIER,
 };
@@ -18,9 +17,6 @@ pub(crate) const COMPOSES_OVER: &[&str] = &[];
 
 /// Whether this transport carries sessions (its claim row states `session = 1`).
 pub(crate) const SESSION: bool = true;
-
-/// The absent string: a slot this transport states nothing in.
-pub(crate) const NONE: AbiStr = AbiStr::ABSENT;
 
 /// The transport kind's tail: the CARRIER of the host's byte stream (the connector carries a tcp
 /// need as a raw stream, frames no opening message for it, and may secure it mid-way), composing
