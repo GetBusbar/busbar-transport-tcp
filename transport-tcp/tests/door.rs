@@ -22,7 +22,7 @@ use busbar_contract::abi::mechanism::call::{
 };
 use busbar_contract::abi::mechanism::door::Door;
 use busbar_contract::abi::mechanism::lifecycle::{
-    slot as life, OpenIn, OpenOut, RefreshIn, ValidateIn,
+    slot as life, OpenIn, OpenOut, RefreshIn, ReleaseIn, ValidateIn,
 };
 use busbar_contract::abi::mechanism::ticket::{HostCtx, HostTables, Ticket};
 use busbar_contract::abi::transport::check::{check_io, check_tail};
@@ -1030,4 +1030,57 @@ fn the_error_arms_answer_the_hosts_words_alone_and_accept_can_be_pending() {
     with(|sc| sc.fail = vec![("listen", Outcome::Refused, "bind not admitted")]);
     let (r, _, said) = listen(inst, "0.0.0.0:80", &mut addr);
     assert_eq!((r, said.as_str()), (Outcome::Refused, "bind not admitted"));
+}
+
+#[test]
+fn the_carrier_states_no_op_facts() {
+    // SAFETY: the door's Statement is this crate's `'static` one, and its kind tail a `'static`
+    // `TransportTail`.
+    let statement = unsafe { &*(*door()).statement() };
+    let tail = unsafe { &*statement.kind_tail().cast::<TransportTail>() };
+    // The op bits are framer terms ("its framer begins on ..."); a carrier states none.
+    assert_eq!(tail.facts, 0);
+}
+
+#[test]
+fn releasing_a_lease_never_handed_out_is_refused() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (inst, _t) = open(Script::default());
+    let mut i: ReleaseIn = z();
+    i.lease = 7;
+    let mut o: OutHead = z();
+    assert_eq!(
+        call(ops().head.release, inst, &mut i, &mut o, life::RELEASE),
+        Outcome::Refused
+    );
+    assert_eq!(text(o.error), "release: no such lease");
+}
+
+#[test]
+fn an_op_with_no_open_instance_fails_naming_the_op() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let mut ci: ConnIn = z();
+    ci.conn = 1;
+    let mut co: OutHead = z();
+    assert_eq!(
+        call(
+            ops().flush,
+            std::ptr::null_mut(),
+            &mut ci,
+            &mut co,
+            slot::FLUSH
+        ),
+        Outcome::Failed
+    );
+    // The refusal is `flush: no open instance`, but the carrier's text is owned (`carried` formats
+    // it) and with no instance nothing keeps it: the SDK answers its fixed no-buffer text until the
+    // static `carried` text lands (busbar #1967). The outcome and the absence of a panic are the pin.
+    assert_eq!(
+        text(co.error),
+        busbar_contract::abi::sdk::out::NO_REASON_BUFFER
+    );
 }
