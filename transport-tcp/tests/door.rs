@@ -1076,11 +1076,5 @@ fn an_op_with_no_open_instance_fails_naming_the_op() {
         ),
         Outcome::Failed
     );
-    // The refusal is `flush: no open instance`, but the carrier's text is owned (`carried` formats
-    // it) and with no instance nothing keeps it: the SDK answers its fixed no-buffer text until the
-    // static `carried` text lands (busbar #1967). The outcome and the absence of a panic are the pin.
-    assert_eq!(
-        text(co.error),
-        busbar_contract::abi::sdk::out::NO_REASON_BUFFER
-    );
+    assert_eq!(text(co.error), "flush: no open instance");
 }
