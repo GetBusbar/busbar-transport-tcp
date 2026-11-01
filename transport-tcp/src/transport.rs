@@ -30,7 +30,7 @@ use busbar_contract::abi::sdk::conn::Host;
 use busbar_contract::abi::sdk::io::{Io, IoFailure, DIR_WRITE, MAX_ADDR};
 use busbar_contract::abi::sdk::life::{Held, Life, Refreshed, Refusal};
 use busbar_contract::abi::sdk::net::SocketAddr;
-use busbar_contract::abi::sdk::transport::{carried, settings_reading};
+use busbar_contract::abi::sdk::transport::settings_reading;
 use busbar_contract::abi::sdk::{Instance, Lent, Out, SafeSlot};
 use busbar_contract::abi::transport::{
     AcceptIn, AcceptOut, AdoptIn, ArrivalIn, ArrivalOut, BeginIn, ConnIn, ConnOut, DialIn, EmitIn,
@@ -133,10 +133,10 @@ fn refusal(e: &IoFailure) -> Refusal {
     }
 }
 
-/// Run `body` over the instance and its I/O ([`carried`]), failing the op without one.
+/// Run `body` over the instance and its I/O, failing the op without either.
 macro_rules! over {
     ($op:literal, $inst:expr, $o:expr, |$c:ident, $io:ident| $body:block) => {
-        match carried(&$inst, $op) {
+        match busbar_contract::carried!($inst, $op) {
             Ok(($c, mut $io)) => $body,
             Err(r) => return $o.fail(r),
         }
