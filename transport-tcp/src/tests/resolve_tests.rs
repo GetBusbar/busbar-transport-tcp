@@ -4,7 +4,6 @@
 use crate::transport::resolve;
 
 /// The carrier dials the pinned address; it does not resolve names here.
-
 #[test]
 fn an_authority_is_its_one_address_and_a_name_is_not_resolved_here() {
     assert_eq!(resolve("127.0.0.1:80"), Some("127.0.0.1:80".into()));

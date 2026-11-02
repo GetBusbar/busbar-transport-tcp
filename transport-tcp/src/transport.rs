@@ -67,7 +67,6 @@ impl Life for Carried {
     }
 
     /// `close`: every host handle this instance still holds, listeners and connections, is closed
-
     fn close(&self, host: Option<&Host>) {
         let Some(mut io) = host.map(|h| h.io(Ticket::NONE)).filter(Io::armed) else {
             return;
@@ -106,7 +105,6 @@ impl Carried {
 }
 
 /// The host's answer, as an op's refusal: the host's policy is REFUSED, the system's FAILED, each in
-
 fn refusal(e: &IoFailure) -> Refusal {
     match e {
         IoFailure::Refused(t) => Refusal::refused(t.clone()),
@@ -201,7 +199,6 @@ impl SafeSlot for Accept {
 }
 
 /// The address a dial opens, byte for byte: an IP literal (`v4:port` or `[v6]:port`) or a `unix:`
-
 #[must_use]
 pub fn resolve(authority: &str) -> Option<String> {
     let literal = authority.starts_with("unix:/") || authority.parse::<SocketAddr>().is_ok();
@@ -209,7 +206,6 @@ pub fn resolve(authority: &str) -> Option<String> {
 }
 
 /// `dial`: the authority's one address, opened once; the connection's token at once, its connect
-
 pub struct Dial;
 impl SafeSlot for Dial {
     type In = DialIn;
@@ -247,7 +243,6 @@ impl SafeSlot for Dial {
 }
 
 /// `flush`: a dial settles — connected; or refused, and the dial answers the far end's refusal.
-
 pub struct Flush;
 impl SafeSlot for Flush {
     type In = ConnIn;
@@ -332,7 +327,6 @@ impl SafeSlot for Write {
 }
 
 /// `shut`: the connection is closed, whatever the reason, and forgotten. An unknown connection is
-
 pub struct Shut;
 impl SafeSlot for Shut {
     type In = ShutIn;

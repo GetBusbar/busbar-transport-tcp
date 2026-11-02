@@ -17,7 +17,6 @@ pub(crate) const COMPOSES_OVER: &[&str] = &[];
 pub(crate) const SESSION: bool = true;
 
 /// The transport kind's tail: the CARRIER of the host's byte stream (the connector carries a tcp
-
 pub(crate) const TAIL: TransportTail = {
     let mut t = TransportTail::EMPTY.with_claim_rows(crate::claims::CLAIMS);
     t.role = ROLE_CARRIER;
