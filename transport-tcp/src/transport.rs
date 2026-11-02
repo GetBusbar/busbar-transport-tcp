@@ -11,7 +11,8 @@
 //!   destination judge already pinned the address it may dial — and opens it, one attempt; the
 //!   connect is bounded by the open the host runs it under;
 //! * `read` answers what the socket has, straight into the host's buffer: a byte stream, so every
-//!   read completes a frame (`READ_END_OF_FRAME`); `write` hands the host what it is offered, and
+//!   read that moves bytes completes a frame (`READ_END_OF_FRAME`); the clean end (`len` 0)
+//!   carries no frame bit; `write` hands the host what it is offered, and
 //!   a frame's end means nothing to a stream;
 //! * `flush` settles the dial (connected, or the far end's refusal);
 //! * `shut` closes the connection whatever the reason, and forgets it; `arrival` answers the far
@@ -300,7 +301,8 @@ impl SafeSlot for Flush {
     }
 }
 
-/// `read`: what the socket has, straight into the host's buffer; every read a frame of the stream.
+/// `read`: what the socket has, straight into the host's buffer; every read that moves bytes a frame
+/// of the stream, the clean end (`len` 0) carrying no frame bit.
 pub struct Read;
 impl SafeSlot for Read {
     type In = ReadIn;
