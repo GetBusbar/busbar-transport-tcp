@@ -3,7 +3,7 @@
 
 use crate::transport::resolve;
 
-/// THE CARRIER DIALS EXACTLY THE PINNED JUDGED ADDRESS (THE DESIGN §5; CONNECTOR-19): an IP
+/// The carrier dials the pinned address; it does not resolve names here.
 
 #[test]
 fn an_authority_is_its_one_address_and_a_name_is_not_resolved_here() {
