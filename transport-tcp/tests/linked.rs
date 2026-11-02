@@ -4,6 +4,7 @@
 //! The `linked` entry the composition root folds, tied to the claim row the door declares.
 
 use busbar_contract::abi::transport::{TransportTail, UNIT0_FIRST_BYTES};
+use busbar_contract::transport::registry::facts as tfacts;
 use busbar_contract::SelectorForm;
 use busbar_transport_tcp::{door, linked};
 
@@ -45,4 +46,8 @@ fn linked_session_is_the_claim_rows_session_and_the_row_states_its_facts() {
     );
     assert!(unsafe { row.egress_selector_forms.bytes() }.is_empty());
     assert_eq!(row.facts_len, 1);
+    // SAFETY: the row's facts are `'static`, `facts_len` of them.
+    let facts = unsafe { std::slice::from_raw_parts(row.facts, row.facts_len) };
+    // SAFETY: each fact's string is `'static`.
+    assert_eq!(unsafe { facts[0].bytes() }, tfacts::PEER.as_bytes());
 }

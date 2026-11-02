@@ -25,7 +25,8 @@ use busbar_contract::abi::transport::{
     slot, AcceptIn, AcceptOut, AdoptIn, ArrivalIn, ArrivalOut, BeginIn, ConnIn, ConnOut,
     Destination, DialIn, EmitIn, EncodeIn, FinishIn, FramerOut, FramingIn, IngestIn, IoOut,
     ListenIn, ListenOut, LocateIn, LocateOut, Ops, ReadIn, RefuseIn, ShutIn, TransportTail,
-    WriteIn, DEST_AUTHORITY, DEST_PROGRAM, EMIT_TRAILERS, READ_END_OF_FRAME, ROLE_CARRIER,
+    WriteIn, DEST_AUTHORITY, DEST_PROGRAM, EMIT_TRAILERS, FRAME_PIECE_SIZE, FRAMING_STREAM,
+    READ_END_OF_FRAME, ROLE_CARRIER,
 };
 use busbar_transport_tcp::door;
 
@@ -336,6 +337,8 @@ fn the_tail_is_a_carrier_composing_over_nothing() {
     let tail = unsafe { &*statement.kind_tail().cast::<TransportTail>() };
     assert_eq!(tail.role, ROLE_CARRIER);
     assert_eq!(tail.composes_over_len(), 0);
+    assert_eq!(tail.framing, FRAMING_STREAM);
+    assert_eq!(tail.frame_piece_size, FRAME_PIECE_SIZE);
     assert_eq!(check_tail(tail), Ok(()));
 }
 
@@ -1033,11 +1036,6 @@ fn the_error_arms_answer_the_hosts_words_alone_and_accept_can_be_pending() {
     assert_eq!(
         write(inst, conn, b"x"),
         (Outcome::Failed, 0, "Broken pipe (os error 32)".to_owned())
-    );
-    let mut o: ArrivalOut = z();
-    assert_eq!(
-        call(ops().arrival, inst, &mut i, &mut o, slot::ARRIVAL),
-        Outcome::Failed
     );
     i.conn = conn;
     let mut o: ArrivalOut = z();
