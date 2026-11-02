@@ -148,6 +148,7 @@ busbar_contract::not_served! {
     NoLocate(LocateIn => LocateOut) "locate";
     NoBegin(BeginIn => FramerOut) "begin";
     NoIngest(IngestIn => FramerOut) "ingest";
+    /// A carrier has no emit operation, including an `EMIT_TRAILERS` final field block.
     NoEmit(EmitIn => FramerOut) "emit";
     NoEncode(EncodeIn => FramerOut) "encode";
     NoRefuse(RefuseIn => FramerOut) "refuse";

@@ -30,7 +30,7 @@ use busbar_contract::abi::transport::{
     slot, AcceptIn, AcceptOut, AdoptIn, ArrivalIn, ArrivalOut, BeginIn, ConnIn, ConnOut,
     Destination, DialIn, EmitIn, EncodeIn, FinishIn, FramerOut, FramingIn, IngestIn, IoOut,
     ListenIn, ListenOut, LocateIn, LocateOut, Ops, ReadIn, RefuseIn, ShutIn, TransportTail,
-    WriteIn, DEST_AUTHORITY, DEST_PROGRAM, READ_END_OF_FRAME, ROLE_CARRIER,
+    WriteIn, DEST_AUTHORITY, DEST_PROGRAM, EMIT_TRAILERS, READ_END_OF_FRAME, ROLE_CARRIER,
 };
 use busbar_transport_tcp::door;
 
@@ -642,6 +642,44 @@ fn every_framer_op_is_refused() {
         text(o.head.error),
         "timer: the tcp carrier does not serve this op"
     );
+}
+
+#[test]
+fn a_trailer_emit_is_refused_without_writing_and_the_carrier_still_carries_bytes() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (inst, _t) = open(Script {
+        writes: vec![Some(5)],
+        ..Script::default()
+    });
+    let (_, conn) = dial(inst, "127.0.0.1:88");
+    let fields = b"x-final: yes\r\n";
+    let mut wire = [0xa5_u8; 64];
+    let mut i: EmitIn = z();
+    i.bytes = fields.as_ptr();
+    i.len = fields.len();
+    i.flags = EMIT_TRAILERS;
+    i.end_of_frame = 1;
+    i.sink.wire = wire.as_mut_ptr();
+    i.sink.wire_cap = wire.len();
+    let mut o: FramerOut = z();
+    assert_eq!(
+        call(ops().emit, inst, &mut i, &mut o, slot::EMIT),
+        Outcome::Refused
+    );
+    assert_eq!(
+        text(o.head.error),
+        "emit: the tcp carrier does not serve this op"
+    );
+    assert_eq!(o.yielded.wire_len, 0);
+    assert_eq!(wire, [0xa5; 64]);
+    with(|sc| assert!(sc.offered.is_empty()));
+    assert_eq!(
+        write(inst, conn, b"after"),
+        (Outcome::Ready, 5, String::new())
+    );
+    with(|sc| assert_eq!(sc.offered, [b"after".to_vec()]));
 }
 
 // ── settings, close ──────────────────────────────────────────────────────────────────────────────
