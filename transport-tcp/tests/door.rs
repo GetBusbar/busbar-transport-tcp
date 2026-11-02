@@ -2,11 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The `tcp` carrier, driven through its own table the way the host drives it, over a SCRIPTED host
-//! I/O table (`abi::host::io`): the one address an authority dials, the settling of a
-//! connect, the frame bit on every read, the close, the arrival facts, and every framer op refused.
-//! (An integration test, so the crate itself stays `#![forbid(unsafe_code)]`: driving a raw table is
-//! the host's side, and needs it.) The real host's I/O is driven by busbar's conformance suite
-//! (`tests/conformance.rs` of the plugin crate).
 
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
@@ -81,8 +76,6 @@ fn call<I, O>(op: Option<Op>, inst: *mut c_void, i: &mut I, o: &mut O, index: u3
     }
     .outcome()
 }
-
-// ── the scripted host ────────────────────────────────────────────────────────────────────────────
 
 /// What the scripted host saw and what it answers.
 #[derive(Default)]
@@ -335,8 +328,6 @@ fn flush(inst: *mut c_void, conn: u64) -> Outcome {
     call(ops().flush, inst, &mut i, &mut o, slot::FLUSH)
 }
 
-// ── the tests ────────────────────────────────────────────────────────────────────────────────────
-
 #[test]
 fn the_tail_is_a_carrier_composing_over_nothing() {
     // SAFETY: the door's Statement is this crate's `'static` one, and its kind tail a `'static`
@@ -358,7 +349,7 @@ fn a_dial_opens_its_address_and_settles_under_flush() {
     assert_eq!(r, Outcome::Ready);
     assert_eq!(flush(inst, conn), Outcome::Ready);
     with(|sc| assert_eq!(sc.opened, ["127.0.0.1:80"]));
-    // RED: a name is refused before the host is asked to open anything.
+
     let (r, _, said) = dial_said(inst, "example.test:80");
     assert_eq!(r, Outcome::Refused);
     assert_eq!(
@@ -386,13 +377,10 @@ fn a_refused_connect_answers_the_systems_words_and_closes_its_handle() {
         call(ops().flush, inst, &mut i, &mut o, slot::FLUSH),
         Outcome::Failed
     );
-    // THE SYSTEM'S WORDS, AND ONLY THEM: a plane passes a refused connect on to its caller (the a2a
-    // card fetch reads "tcp connect error: Connection refused", the agreed predev words busbar's
-    // `a_card_fetch_to_a_closed_port_fails_in_predev_words` holds), so the carrier's op name is no
-    // part of the text a caller can see.
+
     assert_eq!(text(o.error), "Connection refused (os error 111)");
     with(|sc| assert_eq!(sc.closed, [HANDLE_BASE + 1]));
-    // The refused dial was forgotten: shut closes nothing twice.
+
     let mut si: ShutIn = z();
     si.conn = conn;
     let mut so: OutHead = z();
@@ -414,9 +402,9 @@ fn a_dial_the_host_does_not_admit_is_refused_in_the_hosts_words() {
     });
     let (r, _, said) = dial_said(inst, "127.0.0.1:84");
     assert_eq!(r, Outcome::Refused);
-    // The host's words alone: no carrier op name before them (a plane passes them on).
+
     assert_eq!(said, "not admitted for this dial");
-    // No connection was kept.
+
     let mut i: ConnIn = z();
     i.conn = 1;
     let mut o: OutHead = z();
@@ -469,7 +457,7 @@ fn every_read_is_a_frame_of_the_stream_a_pending_one_moves_nothing_and_shut_clos
         i.cap = buf.len();
         let mut o: IoOut = z();
         let r = call(ops().read, inst, &mut i, &mut o, slot::READ);
-        // The contract check runs on what the carrier produced.
+
         if r == Outcome::Ready {
             assert_eq!(check_io(&o, 16), Ok(()));
         }
@@ -478,7 +466,7 @@ fn every_read_is_a_frame_of_the_stream_a_pending_one_moves_nothing_and_shut_clos
     assert_eq!(read().0, Outcome::Pending);
     let (r, len, flags) = read();
     assert_eq!((r, len, flags), (Outcome::Ready, 3, READ_END_OF_FRAME));
-    // The clean end: no bytes, no frame.
+
     assert_eq!(read(), (Outcome::Ready, 0, 0));
     assert_eq!(&buf[..3], b"abc");
 
@@ -490,7 +478,7 @@ fn every_read_is_a_frame_of_the_stream_a_pending_one_moves_nothing_and_shut_clos
         Outcome::Ready
     );
     with(|sc| assert_eq!(sc.closed, [HANDLE_BASE + 1]));
-    // Idempotent: an unknown connection is already closed.
+
     assert_eq!(
         call(ops().shut, inst, &mut i, &mut o, slot::SHUT),
         Outcome::Ready
@@ -516,7 +504,7 @@ fn arrival_answers_the_far_end_and_the_local_port() {
     );
     assert_eq!(o.local_port, 8080);
     assert_eq!(&peer[..o.peer_written as usize], b"127.0.0.1:5555");
-    // A short peer buffer is the short path: FAILED, the size it needs, nothing written.
+
     i.peer_cap = 4;
     let mut o: ArrivalOut = z();
     assert_eq!(
@@ -682,8 +670,6 @@ fn a_trailer_emit_is_refused_without_writing_and_the_carrier_still_carries_bytes
     with(|sc| assert_eq!(sc.offered, [b"after".to_vec()]));
 }
 
-// ── settings, close ──────────────────────────────────────────────────────────────────────────────
-
 /// `validate` over `settings`: the outcome and the words it names.
 fn validate(settings: &'static [u8]) -> (Outcome, String) {
     let mut err = [0_u8; 256];
@@ -840,8 +826,6 @@ fn an_op_without_host_io_fails_in_words_that_name_the_op() {
     assert_eq!(text(co.error), "flush: the host lent this carrier no I/O");
 }
 
-// ── write, pending connect, addresses, and the host's errors ────────────────────────────────────
-
 fn write(inst: *mut c_void, conn: u64, bytes: &[u8]) -> (Outcome, u64, String) {
     let mut i: WriteIn = z();
     i.conn = conn;
@@ -898,19 +882,19 @@ fn a_write_answers_the_bytes_the_socket_took_whole_or_partial_and_pending_moves_
         ..Script::default()
     });
     let (_, conn) = dial(inst, "127.0.0.1:85");
-    // Whole: all five taken.
+
     assert_eq!(
         write(inst, conn, b"hello"),
         (Outcome::Ready, 5, String::new())
     );
-    // Partial: two of five taken; the count answered is the socket's, not the offered length.
+
     assert_eq!(
         write(inst, conn, b"world"),
         (Outcome::Ready, 2, String::new())
     );
-    // Pending: nothing taken.
+
     assert_eq!(write(inst, conn, b"rest").0, Outcome::Pending);
-    // Zero taken is a count, not an error.
+
     assert_eq!(write(inst, conn, b"x"), (Outcome::Ready, 0, String::new()));
     with(|sc| {
         assert_eq!(
@@ -937,13 +921,13 @@ fn a_still_connecting_dial_is_pending_under_flush_then_ready_and_stays_settled()
     let (_, conn) = dial(inst, "127.0.0.1:86");
     assert_eq!(flush(inst, conn), Outcome::Pending);
     assert_eq!(flush(inst, conn), Outcome::Pending);
-    // The connect completes.
+
     with(|sc| sc.ready_pending.clear());
     assert_eq!(flush(inst, conn), Outcome::Ready);
-    // Settled: a later flush does not ask the host again (it would answer Pending).
+
     with(|sc| sc.ready_pending.push(HANDLE_BASE + 1));
     assert_eq!(flush(inst, conn), Outcome::Ready);
-    // An accepted connection is settled from the start.
+
     let (mut addr, mut peer) = ([0_u8; 64], [0_u8; 64]);
     let (_, lo, _) = listen(inst, "127.0.0.1:0", &mut addr);
     let (_, ao, _) = accept(inst, lo.listener, &mut peer);
@@ -966,7 +950,7 @@ fn listen_and_accept_write_the_bound_and_peer_addresses() {
     assert_eq!(r, Outcome::Ready);
     assert_eq!(ao.peer_written as usize, PEER.len());
     assert_eq!(&peer[..ao.peer_written as usize], PEER.as_bytes());
-    // The accepted connection is usable under its own token.
+
     assert_ne!(ao.conn, 0);
     assert_eq!(flush(inst, ao.conn), Outcome::Ready);
 }
@@ -981,7 +965,7 @@ fn the_error_arms_answer_the_hosts_words_alone_and_accept_can_be_pending() {
         ..Script::default()
     });
     let (mut addr, mut peer) = ([0_u8; 64], [0_u8; 64]);
-    // Unknown tokens are the carrier's own refusals, named by op.
+
     let (r, _, said) = accept(inst, 99, &mut peer);
     assert_eq!(
         (r, said.as_str()),
@@ -1005,7 +989,7 @@ fn the_error_arms_answer_the_hosts_words_alone_and_accept_can_be_pending() {
         Outcome::Failed
     );
     assert_eq!(text(o.head.error), "arrival: no such connection");
-    // A non-UTF-8 bind never reaches the host.
+
     let bad = [0xff_u8, 0xfe];
     let mut li: ListenIn = z();
     li.bind = unsafe { AbiStr::from_raw_parts(bad.as_ptr(), bad.len()) };
@@ -1018,13 +1002,11 @@ fn the_error_arms_answer_the_hosts_words_alone_and_accept_can_be_pending() {
     );
     assert_eq!(text(lo.head.error), "listen: the bind address is not UTF-8");
 
-    // Accept with no connection ready is PENDING and moves nothing.
     let (r, lo, _) = listen(inst, "127.0.0.1:0", &mut addr);
     assert_eq!(r, Outcome::Ready);
     let (r, ao, _) = accept(inst, lo.listener, &mut peer);
     assert_eq!((r, ao.conn, ao.peer_written), (Outcome::Pending, 0, 0));
 
-    // The host's errors come back in the host's words alone, no op prefix.
     let (_, conn) = dial(inst, "127.0.0.1:87");
     with(|sc| {
         sc.accept_pending = false;
@@ -1064,7 +1046,7 @@ fn the_error_arms_answer_the_hosts_words_alone_and_accept_can_be_pending() {
         Outcome::Failed
     );
     assert_eq!(text(o.head.error), "ends boom");
-    // A bind the host does not admit is REFUSED in the host's words.
+
     with(|sc| sc.fail = vec![("listen", Outcome::Refused, "bind not admitted")]);
     let (r, _, said) = listen(inst, "0.0.0.0:80", &mut addr);
     assert_eq!((r, said.as_str()), (Outcome::Refused, "bind not admitted"));
@@ -1076,7 +1058,7 @@ fn the_carrier_states_no_op_facts() {
     // `TransportTail`.
     let statement = unsafe { &*(*door()).statement() };
     let tail = unsafe { &*statement.kind_tail().cast::<TransportTail>() };
-    // The op bits are framer terms ("its framer begins on ..."); a carrier states none.
+
     assert_eq!(tail.facts, 0);
 }
 

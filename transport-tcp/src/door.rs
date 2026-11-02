@@ -2,14 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! THE `tcp` DOOR: this transport as a CARRIER on the transport kind's table
-//! (`busbar_contract::abi::transport`), compiled in or dropped in through the one door. Every slot
-//! is a [`SafeSlot`](busbar_contract::abi::sdk::SafeSlot) over the SDK's generic lifecycle
-//! (`life(Carried)`): no `unsafe` in this crate.
-//!
-//! The socket is the host's: this carrier listens, accepts,
-//! dials, reads, writes and closes through the host's I/O (`io.*`), holding only the host's opaque
-//! handles, and owns the policy over them ([`crate::transport`]). Every framer op (`locate` ..
-//! `timer`) is REFUSED: a carrier frames nothing.
 
 use busbar_contract::abi::mechanism::door::Statement;
 use busbar_contract::abi::sdk::door::statement;

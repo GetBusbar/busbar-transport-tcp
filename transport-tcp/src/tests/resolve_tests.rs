@@ -4,9 +4,7 @@
 use crate::transport::resolve;
 
 /// THE CARRIER DIALS EXACTLY THE PINNED JUDGED ADDRESS (THE DESIGN §5; CONNECTOR-19): an IP
-/// literal or a `unix:` absolute path, byte for byte. A name (`localhost` included) and a scheme
-/// prefix are the connector's to read, never rewritten here. RED before the fix: `localhost` was
-/// mapped to the IPv4 loopback and `tcp://` stripped inside the plugin.
+
 #[test]
 fn an_authority_is_its_one_address_and_a_name_is_not_resolved_here() {
     assert_eq!(resolve("127.0.0.1:80"), Some("127.0.0.1:80".into()));

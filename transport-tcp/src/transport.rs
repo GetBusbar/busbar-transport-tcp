@@ -2,22 +2,6 @@
 // Copyright (C) 2026 Busbar Inc and contributors
 
 //! The `tcp` CARRIER: the carrier ops over the HOST'S I/O (`busbar_contract::abi::host::io`,
-//! `io.*`), and the framer ops refused. The host owns every socket; this carrier holds only the
-//! host's opaque handles and owns the policy over them:
-//!
-//! * `listen` binds the address it is asked to, and `accept` takes each connection off it;
-//! * `dial` reads the authority it is lent (`ip:port`, `[v6]:port` or `unix:` and an absolute path,
-//!   byte for byte) as its ONE address — never a name, which it does not resolve: the host's one
-//!   destination judge already pinned the address it may dial — and opens it, one attempt; the
-//!   connect is bounded by the open the host runs it under;
-//! * `read` answers what the socket has, straight into the host's buffer: a byte stream, so every
-//!   read completes a frame (`READ_END_OF_FRAME`); `write` hands the host what it is offered, and
-//!   a frame's end means nothing to a stream;
-//! * `flush` settles the dial (connected, or the far end's refusal);
-//! * `shut` closes the connection whatever the reason, and forgets it; `arrival` answers the far
-//!   end's address and the local port, as the host reads them off the socket.
-//!
-//! No op holds a byte of its own: a PENDING op moved nothing, so a cancel finds nothing moved.
 
 use std::collections::HashMap;
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -83,8 +67,7 @@ impl Life for Carried {
     }
 
     /// `close`: every host handle this instance still holds, listeners and connections, is closed
-    /// through the host's I/O (errors ignored: the instance is going either way); the SDK answers
-    /// READY and drops the state.
+
     fn close(&self, host: Option<&Host>) {
         let Some(mut io) = host.map(|h| h.io(Ticket::NONE)).filter(Io::armed) else {
             return;
@@ -123,9 +106,7 @@ impl Carried {
 }
 
 /// The host's answer, as an op's refusal: the host's policy is REFUSED, the system's FAILED, each in
-/// the host's own words and nothing else. A plane passes a refused connect on to its caller (the
-/// a2a card fetch's "tcp connect error: Connection refused"), so the carrier's op name is no part of
-/// it: the host knows which op it crossed.
+
 fn refusal(e: &IoFailure) -> Refusal {
     match e {
         IoFailure::Refused(t) => Refusal::refused(t.clone()),
@@ -220,9 +201,7 @@ impl SafeSlot for Accept {
 }
 
 /// The address a dial opens, byte for byte: an IP literal (`v4:port` or `[v6]:port`) or a `unix:`
-/// absolute path, and nothing else. A name (`localhost` included) and a scheme prefix are not read
-/// here: the host's one destination judge resolves and pins the address a dial may reach and hands
-/// this carrier that pinned address, which the carrier dials exactly.
+
 #[must_use]
 pub fn resolve(authority: &str) -> Option<String> {
     let literal = authority.starts_with("unix:/") || authority.parse::<SocketAddr>().is_ok();
@@ -230,7 +209,7 @@ pub fn resolve(authority: &str) -> Option<String> {
 }
 
 /// `dial`: the authority's one address, opened once; the connection's token at once, its connect
-/// settling under `flush`. A program is not this carrier's destination: REFUSED.
+
 pub struct Dial;
 impl SafeSlot for Dial {
     type In = DialIn;
@@ -268,7 +247,7 @@ impl SafeSlot for Dial {
 }
 
 /// `flush`: a dial settles — connected; or refused, and the dial answers the far end's refusal.
-/// Nothing is held to write.
+
 pub struct Flush;
 impl SafeSlot for Flush {
     type In = ConnIn;
@@ -353,7 +332,7 @@ impl SafeSlot for Write {
 }
 
 /// `shut`: the connection is closed, whatever the reason, and forgotten. An unknown connection is
-/// already closed.
+
 pub struct Shut;
 impl SafeSlot for Shut {
     type In = ShutIn;
