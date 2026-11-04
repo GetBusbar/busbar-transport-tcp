@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! The `tcp` carrier, driven through its own table the way the host drives it, over a SCRIPTED host
+//! The `tcp` carrier driven through its ABI table over scripted host I/O.
 
 use std::ffi::c_void;
 use std::mem::{size_of, zeroed};
@@ -202,6 +202,9 @@ extern "C" fn io_read(_: HostCtx, input: *const c_void, out: *mut ServiceOut) ->
 }
 
 extern "C" fn io_close(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -> RawOutcome {
+    if let Some(r) = failing("close", out) {
+        return r;
+    }
     // SAFETY: the carrier's `in`.
     let i = unsafe { input.cast::<HandleIn>().read() };
     with(|sc| sc.closed.push(i.handle));
@@ -1095,4 +1098,60 @@ fn an_op_with_no_open_instance_fails_naming_the_op() {
         Outcome::Failed
     );
     assert_eq!(text(co.error), "flush: no open instance");
+}
+
+#[test]
+fn a_failed_shut_keeps_the_connection_for_a_successful_retry() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (inst, _t) = open(Script {
+        fail: vec![("close", Outcome::Failed, "close unavailable")],
+        ..Script::default()
+    });
+    let (_, conn) = dial(inst, "127.0.0.1:89");
+    let mut i: ShutIn = z();
+    i.conn = conn;
+    let mut o: OutHead = z();
+    assert_eq!(
+        call(ops().shut, inst, &mut i, &mut o, slot::SHUT),
+        Outcome::Failed
+    );
+    assert_eq!(text(o.error), "close unavailable");
+    with(|sc| assert!(sc.closed.is_empty()));
+    assert_eq!(flush(inst, conn), Outcome::Ready);
+    with(|sc| sc.fail.clear());
+    let mut o: OutHead = z();
+    assert_eq!(
+        call(ops().shut, inst, &mut i, &mut o, slot::SHUT),
+        Outcome::Ready
+    );
+    with(|sc| assert_eq!(sc.closed, [HANDLE_BASE + 1]));
+    assert_eq!(flush(inst, conn), Outcome::Failed);
+}
+
+#[test]
+fn failed_connect_cleanup_can_be_retried_by_shut() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (inst, _t) = open(Script {
+        fail_ready: vec![HANDLE_BASE + 1],
+        fail: vec![("close", Outcome::Failed, "close unavailable")],
+        ..Script::default()
+    });
+    let (_, conn) = dial(inst, "127.0.0.1:89");
+    assert_eq!(flush(inst, conn), Outcome::Failed);
+    with(|sc| {
+        assert!(sc.closed.is_empty());
+        sc.fail.clear();
+    });
+    let mut i: ShutIn = z();
+    i.conn = conn;
+    let mut o: OutHead = z();
+    assert_eq!(
+        call(ops().shut, inst, &mut i, &mut o, slot::SHUT),
+        Outcome::Ready
+    );
+    with(|sc| assert_eq!(sc.closed, [HANDLE_BASE + 1]));
 }

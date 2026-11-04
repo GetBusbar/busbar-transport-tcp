@@ -18,6 +18,10 @@ First-party signed kind:transport plugin cdylib: the tcp transport, packaged as 
 
 Configured under the `tcp` module name.
 
+## Connection cleanup
+
+If host I/O cannot close a connection, `shut` reports the failure and retains the connection for a later close attempt. Successful closes and closing an unknown connection remain idempotent.
+
 ## Build
 
 ```bash

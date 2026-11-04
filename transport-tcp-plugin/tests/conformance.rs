@@ -118,6 +118,7 @@ fn go<I: InFrame, O: OutFrame>(
     i: I,
 ) -> (Called, O) {
     let mut f = Frame::new(i, output::<O>());
+    side.ticket.register(&Waker::from(Arc::clone(&side.woken)));
     let c = p.call_inline(side.ticket.ticket(), resume, s, &mut f);
     (c, f.out)
 }
@@ -273,17 +274,22 @@ fn write_once(p: &Plugin<Transport>, side: &Side, conn: u64, bytes: &[u8], resum
     }
 }
 
-fn read_once(p: &Plugin<Transport>, side: &Side, conn: u64, resume: bool) -> String {
-    let mut buf = vec![0_u8; 64 * 1024];
+fn read_piece(p: &Plugin<Transport>, side: &Side, conn: u64, resume: bool) -> (Called, IoOut, u8) {
+    let mut byte = 0;
     let mut i: ReadIn = input();
     i.conn = conn;
-    i.buf = buf.as_mut_ptr();
-    i.cap = buf.len();
+    i.buf = &mut byte;
+    i.cap = 1;
     let (c, o) = go::<_, IoOut>(p, side, resume, slot::READ, i);
+    (c, o, byte)
+}
+
+fn read_once(p: &Plugin<Transport>, side: &Side, conn: u64, resume: bool) -> String {
+    let (c, o, byte) = read_piece(p, side, conn, resume);
     match c.outcome {
         Outcome::Ready => format!(
             "Ready bytes={:?} end_of_frame={}",
-            lossy(&buf[..o.len as usize]),
+            lossy(&[byte][..o.len as usize]),
             o.flags & READ_END_OF_FRAME != 0
         ),
         other => format!("{other:?} err={:?}", err(&c)),
@@ -309,23 +315,72 @@ fn woken(_host: &HostIo, side: &Side) -> bool {
     false
 }
 
-fn echo() -> String {
-    let l = TcpListener::bind("127.0.0.1:0").expect("the echo far end binds");
-    let at = l.local_addr().expect("bound").to_string();
-    std::thread::spawn(move || {
-        for s in l.incoming() {
-            let Ok(mut s) = s else { return };
-            std::thread::spawn(move || {
-                let mut buf = [0_u8; 4096];
-                while let Ok(n) = s.read(&mut buf) {
-                    if n == 0 || s.write_all(&buf[..n]).is_err() {
+struct EchoServer {
+    address: String,
+    stop: Arc<AtomicBool>,
+    worker: Option<std::thread::JoinHandle<()>>,
+}
+
+impl EchoServer {
+    fn new() -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("the echo far end binds");
+        let address = listener.local_addr().expect("bound").to_string();
+        listener.set_nonblocking(true).unwrap();
+        let stop = Arc::new(AtomicBool::new(false));
+        let stopping = Arc::clone(&stop);
+        let worker = std::thread::spawn(move || {
+            while !stopping.load(Ordering::SeqCst) {
+                match listener.accept() {
+                    Ok((mut stream, _)) => {
+                        stream.set_nonblocking(false).unwrap();
+                        stream
+                            .set_read_timeout(Some(Duration::from_millis(100)))
+                            .unwrap();
+                        stream
+                            .set_write_timeout(Some(Duration::from_millis(100)))
+                            .unwrap();
+                        let mut buf = [0_u8; 4096];
+                        while !stopping.load(Ordering::SeqCst) {
+                            match stream.read(&mut buf) {
+                                Ok(0) => return,
+                                Ok(n) => {
+                                    if stream.write_all(&buf[..n]).is_err() {
+                                        return;
+                                    }
+                                }
+                                Err(e)
+                                    if matches!(
+                                        e.kind(),
+                                        std::io::ErrorKind::WouldBlock
+                                            | std::io::ErrorKind::TimedOut
+                                    ) => {}
+                                Err(_) => return,
+                            }
+                        }
                         return;
                     }
+                    Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                        std::thread::sleep(Duration::from_millis(2))
+                    }
+                    Err(_) => return,
                 }
-            });
+            }
+        });
+        Self {
+            address,
+            stop,
+            worker: Some(worker),
         }
-    });
-    at
+    }
+}
+
+impl Drop for EchoServer {
+    fn drop(&mut self) {
+        self.stop.store(true, Ordering::SeqCst);
+        if let Some(worker) = self.worker.take() {
+            let _ = worker.join();
+        }
+    }
 }
 
 enum Want {
@@ -492,11 +547,13 @@ fn carrier(dropped: bool) -> Vec<(String, String, u64, u64)> {
                 i.peer_buf = peer.as_mut_ptr();
                 i.peer_cap = peer.len();
                 let mut frame = Frame::new(i, output::<AcceptOut>());
+                ls.ticket.register(&Waker::from(Arc::clone(&ls.woken)));
                 let mut c = p.call_inline(ls.ticket.ticket(), false, slot::ACCEPT, &mut frame);
                 let until = Instant::now() + Duration::from_secs(5);
                 while c.outcome == Outcome::Pending && Instant::now() < until {
                     std::thread::sleep(Duration::from_millis(2));
                     if ls.woken.0.swap(false, Ordering::SeqCst) {
+                        ls.ticket.register(&Waker::from(Arc::clone(&ls.woken)));
                         c = p.call_inline(ls.ticket.ticket(), true, slot::ACCEPT, &mut frame);
                     }
                 }
@@ -550,15 +607,14 @@ fn carrier(dropped: bool) -> Vec<(String, String, u64, u64)> {
         far.write_all(b"from the far end")
             .expect("the far end writes");
 
-        std::thread::sleep(Duration::from_millis(100));
         let want = is("Ready bytes=\"from the far end\" end_of_frame=true");
         {
             let before = counts(&p);
-            let answer = read(&p, &rd, accepted, false);
+            let answer = read(&p, &rd, accepted, false, b"from the far end".len());
             let after = counts(&p);
             let crossed = after.0 - before.0;
             let resumed = after.1 - before.1;
-            assert_eq!(crossed, 1, "{}", "accepted read");
+            assert_eq!(crossed, b"from the far end".len() as u64, "accepted read");
             match want {
                 Want::Is(expected) => assert_eq!(answer, expected, "{}", "accepted read"),
                 Want::Starts(prefix) => assert!(
@@ -576,7 +632,7 @@ fn carrier(dropped: bool) -> Vec<(String, String, u64, u64)> {
             let after = counts(&p);
             let crossed = after.0 - before.0;
             let resumed = after.1 - before.1;
-            assert_eq!(crossed, 1, "{}", "accepted write");
+            assert_eq!(crossed, b"to the far end".len() as u64, "accepted write");
             match is("Ready len=14") {
                 Want::Is(expected) => assert_eq!(answer, expected, "{}", "accepted write"),
                 Want::Starts(prefix) => assert!(
@@ -650,12 +706,13 @@ fn carrier(dropped: bool) -> Vec<(String, String, u64, u64)> {
         };
     }
 
+    let echo = (k["dial"].as_str() == Some("authority")).then(EchoServer::new);
     let (dest, other) = match &k["dial"] {
         serde_json::Value::String(a) if a == "authority" => {
-            let at = echo();
+            let at = &echo.as_ref().unwrap().address;
             host.admit(wr.ticket.ticket(), Admission::Dial(vec![at.clone()]));
             (
-                Dest::authority(&at),
+                Dest::authority(at),
                 Dest::program(&serde_json::json!({ "program": "/bin/cat" })),
             )
         }
@@ -695,7 +752,6 @@ fn carrier(dropped: bool) -> Vec<(String, String, u64, u64)> {
         };
         results.push((("flush").to_string(), answer, crossed, resumed));
     };
-    let made = host.made(wr.ticket.ticket());
     for (n, x) in k["exchange"]
         .as_array()
         .expect("conformance.json: transport.carrier.exchange must be an array")
@@ -715,7 +771,11 @@ fn carrier(dropped: bool) -> Vec<(String, String, u64, u64)> {
             let after = counts(&p);
             let crossed = after.0 - before.0;
             let resumed = after.1 - before.1;
-            assert_eq!(crossed, 1, "{}", &format!("write #{n}"));
+            assert_eq!(
+                crossed,
+                if refused { 1 } else { frame.len() as u64 },
+                "write #{n}"
+            );
             match want {
                 Want::Is(expected) => assert_eq!(answer, expected, "{}", &format!("write #{n}")),
                 Want::Starts(prefix) => assert!(
@@ -730,20 +790,20 @@ fn carrier(dropped: bool) -> Vec<(String, String, u64, u64)> {
         if refused {
             continue;
         }
-        if let Some(h) = made {
-            let _ = h;
-            std::thread::sleep(Duration::from_millis(100));
-        }
         let answer = text(&x["read"], "exchange.read");
         let answer = lossy(answer.as_bytes());
         let want = Want::Is(format!("Ready bytes={answer:?} end_of_frame=true"));
         {
             let before = counts(&p);
-            let answer = read(&p, &rd, conn, false);
+            let answer = read(&p, &rd, conn, false, answer.len());
             let after = counts(&p);
             let crossed = after.0 - before.0;
             let resumed = after.1 - before.1;
-            assert_eq!(crossed, 1, "{}", &format!("read #{n}"));
+            assert_eq!(
+                crossed,
+                text(&x["read"], "exchange.read").len() as u64,
+                "read #{n}"
+            );
             match want {
                 Want::Is(expected) => assert_eq!(answer, expected, "{}", &format!("read #{n}")),
                 Want::Starts(prefix) => assert!(
@@ -761,87 +821,95 @@ fn carrier(dropped: bool) -> Vec<(String, String, u64, u64)> {
         text(&pend["write"], "pending.write"),
         text(&pend["read"], "pending.read"),
     );
-    rd.woken.0.store(false, Ordering::SeqCst);
-    {
-        let before = counts(&p);
-        let answer = read_once(&p, &rd, conn, false);
-        let after = counts(&p);
-        let crossed = after.0 - before.0;
-        let resumed = after.1 - before.1;
-        assert_eq!(crossed, 1, "{}", "read pending");
-        match Want::Starts("Pending ") {
-            Want::Is(expected) => assert_eq!(answer, expected, "{}", "read pending"),
-            Want::Starts(prefix) => {
-                assert!(answer.starts_with(prefix), "{}: {}", "read pending", answer)
-            }
+    for _ in 0..2 {
+        rd.woken.0.store(false, Ordering::SeqCst);
+        {
+            let before = counts(&p);
+            let answer = read_once(&p, &rd, conn, false);
+            let after = counts(&p);
+            let crossed = after.0 - before.0;
+            let resumed = after.1 - before.1;
+            assert_eq!(crossed, 1, "{}", "read pending");
+            match Want::Starts("Pending ") {
+                Want::Is(expected) => assert_eq!(answer, expected, "{}", "read pending"),
+                Want::Starts(prefix) => {
+                    assert!(answer.starts_with(prefix), "{}: {}", "read pending", answer)
+                }
+            };
+            results.push((("read pending").to_string(), answer, crossed, resumed));
         };
-        results.push((("read pending").to_string(), answer, crossed, resumed));
-    };
-    let want = Want::Is(format!("Ready len={}", frame.len()));
-    {
-        let before = counts(&p);
-        let answer = write(&p, &wr, conn, frame.as_bytes());
-        let after = counts(&p);
-        let crossed = after.0 - before.0;
-        let resumed = after.1 - before.1;
-        assert_eq!(crossed, 1, "{}", "write while a read pends");
-        match want {
-            Want::Is(expected) => assert_eq!(answer, expected, "{}", "write while a read pends"),
-            Want::Starts(prefix) => assert!(
-                answer.starts_with(prefix),
-                "{}: {}",
-                "write while a read pends",
-                answer
-            ),
+        let want = Want::Is(format!("Ready len={}", frame.len()));
+        {
+            let before = counts(&p);
+            let answer = write(&p, &wr, conn, frame.as_bytes());
+            let after = counts(&p);
+            let crossed = after.0 - before.0;
+            let resumed = after.1 - before.1;
+            assert_eq!(crossed, frame.len() as u64, "write while a read pends");
+            match want {
+                Want::Is(expected) => {
+                    assert_eq!(answer, expected, "{}", "write while a read pends")
+                }
+                Want::Starts(prefix) => assert!(
+                    answer.starts_with(prefix),
+                    "{}: {}",
+                    "write while a read pends",
+                    answer
+                ),
+            };
+            results.push((
+                ("write while a read pends").to_string(),
+                answer,
+                crossed,
+                resumed,
+            ));
         };
-        results.push((
-            ("write while a read pends").to_string(),
-            answer,
-            crossed,
-            resumed,
-        ));
-    };
-    {
-        let before = counts(&p);
-        let answer = format!("{}", woken(&host, &rd));
-        let after = counts(&p);
-        let crossed = after.0 - before.0;
-        let resumed = after.1 - before.1;
-        assert_eq!(crossed, 0, "{}", "the host woke the read");
-        match is("true") {
-            Want::Is(expected) => assert_eq!(answer, expected, "{}", "the host woke the read"),
-            Want::Starts(prefix) => assert!(
-                answer.starts_with(prefix),
-                "{}: {}",
-                "the host woke the read",
-                answer
-            ),
+        {
+            let before = counts(&p);
+            let answer = format!("{}", woken(&host, &rd));
+            let after = counts(&p);
+            let crossed = after.0 - before.0;
+            let resumed = after.1 - before.1;
+            assert_eq!(crossed, 0, "{}", "the host woke the read");
+            match is("true") {
+                Want::Is(expected) => assert_eq!(answer, expected, "{}", "the host woke the read"),
+                Want::Starts(prefix) => assert!(
+                    answer.starts_with(prefix),
+                    "{}: {}",
+                    "the host woke the read",
+                    answer
+                ),
+            };
+            results.push((
+                ("the host woke the read").to_string(),
+                answer,
+                crossed,
+                resumed,
+            ));
         };
-        results.push((
-            ("the host woke the read").to_string(),
-            answer,
-            crossed,
-            resumed,
-        ));
-    };
 
-    let answer = lossy(answer.as_bytes());
-    let want = Want::Is(format!("Ready bytes={answer:?} end_of_frame=true"));
-    {
-        let before = counts(&p);
-        let answer = read(&p, &rd, conn, true);
-        let after = counts(&p);
-        let crossed = after.0 - before.0;
-        let resumed = after.1 - before.1;
-        assert_eq!(crossed, 0, "{}", "read resumed");
-        match want {
-            Want::Is(expected) => assert_eq!(answer, expected, "{}", "read resumed"),
-            Want::Starts(prefix) => {
-                assert!(answer.starts_with(prefix), "{}: {}", "read resumed", answer)
-            }
+        let answer = lossy(answer.as_bytes());
+        let want = Want::Is(format!("Ready bytes={answer:?} end_of_frame=true"));
+        {
+            let before = counts(&p);
+            let answer = read(&p, &rd, conn, true, answer.len());
+            let after = counts(&p);
+            let crossed = after.0 - before.0;
+            let resumed = after.1 - before.1;
+            assert_eq!(
+                crossed,
+                text(&pend["read"], "pending.read").len() as u64 - 1,
+                "read resumed"
+            );
+            match want {
+                Want::Is(expected) => assert_eq!(answer, expected, "{}", "read resumed"),
+                Want::Starts(prefix) => {
+                    assert!(answer.starts_with(prefix), "{}: {}", "read resumed", answer)
+                }
+            };
+            results.push((("read resumed").to_string(), answer, crossed, resumed));
         };
-        results.push((("read resumed").to_string(), answer, crossed, resumed));
-    };
+    }
     {
         let before = counts(&p);
         let answer = shut(&p, &wr, conn);
@@ -1071,15 +1139,8 @@ fn the_linked_and_the_dropped_in_door_are_one_plugin() {
     if std::env::var("BUSBAR_CONFORMANCE_RED").as_deref() == Ok("count") {
         dropped[0].2 += 1;
     }
-    assert_eq!(
-        linked
-            .iter()
-            .map(|(n, a, c, _)| (n, a, c))
-            .collect::<Vec<_>>(),
-        dropped
-            .iter()
-            .map(|(n, a, c, _)| (n, a, c))
-            .collect::<Vec<_>>(),
+    assert!(
+        same_observations(&linked, &dropped),
         "crossing(s), pinned: linked and dropped answers/counts must agree"
     );
 }
@@ -1115,16 +1176,25 @@ fn flush(p: &Plugin<Transport>, side: &Side, conn: u64) -> String {
     }
     answer
 }
-fn read(p: &Plugin<Transport>, side: &Side, conn: u64, resume: bool) -> String {
-    let mut answer = read_once(p, side, conn, resume);
+fn read(p: &Plugin<Transport>, side: &Side, conn: u64, resume: bool, len: usize) -> String {
+    let mut bytes = Vec::with_capacity(len);
     let until = Instant::now() + Duration::from_secs(5);
-    while answer.starts_with("Pending") && Instant::now() < until {
-        std::thread::sleep(Duration::from_millis(2));
-        if side.woken.0.swap(false, Ordering::SeqCst) {
-            answer = read_once(p, side, conn, true);
+    for n in 0..len {
+        let (mut c, mut o, mut byte) = read_piece(p, side, conn, resume && n == 0);
+        while c.outcome == Outcome::Pending && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(2));
+            if side.woken.0.swap(false, Ordering::SeqCst) {
+                (c, o, byte) = read_piece(p, side, conn, true);
+            }
         }
+        if c.outcome != Outcome::Ready {
+            return format!("{:?} err={:?}", c.outcome, err(&c));
+        }
+        assert_eq!(o.len, 1, "unexpected EOF or invalid byte count");
+        assert_eq!(o.flags & READ_END_OF_FRAME, READ_END_OF_FRAME);
+        bytes.push(byte);
     }
-    answer
+    format!("Ready bytes={:?} end_of_frame=true", lossy(&bytes))
 }
 
 fn row() -> LinkedRow {
@@ -1155,8 +1225,8 @@ fn red_a_moved_crossing_count_is_refused() {
     for index in 0..honest.len() {
         let mut changed = honest.clone();
         changed[index].2 += 1;
-        assert_ne!(
-            honest, changed,
+        assert!(
+            !same_observations(&honest, &changed),
             "changed count at {} was accepted",
             honest[index].0
         );
@@ -1165,7 +1235,7 @@ fn red_a_moved_crossing_count_is_refused() {
     for step in &mut doubled {
         step.2 *= 2;
     }
-    assert_ne!(honest, doubled);
+    assert!(!same_observations(&honest, &doubled));
 }
 
 #[test]
@@ -1209,13 +1279,27 @@ fn red_a_networked_door_with_no_connection_table_is_refused() {
 }
 
 fn write(p: &Plugin<Transport>, side: &Side, conn: u64, bytes: &[u8]) -> String {
-    let mut answer = write_once(p, side, conn, bytes, false);
     let until = Instant::now() + Duration::from_secs(5);
-    while answer.starts_with("Pending") && Instant::now() < until {
-        std::thread::sleep(Duration::from_millis(2));
-        if side.woken.0.swap(false, Ordering::SeqCst) {
-            answer = write_once(p, side, conn, bytes, true);
+    for byte in bytes {
+        let one = std::slice::from_ref(byte);
+        let mut answer = write_once(p, side, conn, one, false);
+        while answer.starts_with("Pending") && Instant::now() < until {
+            std::thread::sleep(Duration::from_millis(2));
+            if side.woken.0.swap(false, Ordering::SeqCst) {
+                answer = write_once(p, side, conn, one, true);
+            }
+        }
+        if answer != "Ready len=1" {
+            return answer;
         }
     }
-    answer
+    format!("Ready len={}", bytes.len())
+}
+
+type Observation = (String, String, u64, u64);
+
+fn same_observations(left: &[Observation], right: &[Observation]) -> bool {
+    left.iter()
+        .map(|(n, a, c, _)| (n, a, c))
+        .eq(right.iter().map(|(n, a, c, _)| (n, a, c)))
 }

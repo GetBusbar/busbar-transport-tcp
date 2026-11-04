@@ -15,7 +15,7 @@
 //!   carries no frame bit; `write` hands the host what it is offered, and
 //!   a frame's end means nothing to a stream;
 //! * `flush` settles the dial (connected, or the far end's refusal);
-//! * `shut` closes the connection whatever the reason, and forgets it; `arrival` answers the far
+//! * `shut` closes and forgets the connection, retaining it if close fails; `arrival` answers the far
 //!   end's address and the local port, as the host reads them off the socket.
 //!
 //! No op holds a byte of its own: a PENDING op moved nothing, so a cancel finds nothing moved.
@@ -121,7 +121,7 @@ impl Carried {
     }
 }
 
-/// The host's answer, as an op's refusal: the host's policy is REFUSED, the system's FAILED, each in
+/// Map host policy refusals and system failures to their respective outcomes in the host's words.
 fn refusal(e: &IoFailure) -> Refusal {
     match e {
         IoFailure::Refused(t) => Refusal::refused(t.clone()),
@@ -215,14 +215,14 @@ impl SafeSlot for Accept {
     }
 }
 
-/// The address a dial opens, byte for byte: an IP literal (`v4:port` or `[v6]:port`) or a `unix:`
+/// The address a dial opens verbatim: an IP socket address or a `unix:` absolute path.
 #[must_use]
 pub fn resolve(authority: &str) -> Option<String> {
     let literal = authority.starts_with("unix:/") || authority.parse::<SocketAddr>().is_ok();
     literal.then(|| authority.to_owned())
 }
 
-/// `dial`: the authority's one address, opened once; the connection's token at once, its connect
+/// `dial`: open the authority's one address and return its token; `flush` settles the connect.
 pub struct Dial;
 impl SafeSlot for Dial {
     type In = DialIn;
@@ -283,8 +283,9 @@ impl SafeSlot for Flush {
                     Outcome::Ready
                 }
                 Poll::Ready(Err(e)) => {
-                    let _ = io.close(h);
-                    c.conns().remove(&i.conn());
+                    if io.close(h).is_ok() {
+                        c.conns().remove(&i.conn());
+                    }
                     o.fail(refusal(&e))
                 }
             }
@@ -344,7 +345,7 @@ impl SafeSlot for Write {
     }
 }
 
-/// `shut`: the connection is closed, whatever the reason, and forgotten. An unknown connection is
+/// `shut`: close and forget the connection, retaining it on failure so cleanup can retry.
 pub struct Shut;
 impl SafeSlot for Shut {
     type In = ShutIn;
@@ -352,8 +353,12 @@ impl SafeSlot for Shut {
     type State = State;
     fn call(inst: Instance<'_, State>, i: Lent<'_, ShutIn>, mut o: Out<'_, OutHead>) -> Outcome {
         over!("shut", inst, o, |c, io| {
-            if let Some(conn) = c.conns().remove(&i.conn()) {
-                let _ = io.close(conn.io);
+            let conn = c.conns().remove(&i.conn());
+            if let Some(conn) = conn {
+                if let Err(e) = io.close(conn.io) {
+                    c.conns().insert(i.conn(), conn);
+                    return o.fail(refusal(&e));
+                }
             }
             Outcome::Ready
         })

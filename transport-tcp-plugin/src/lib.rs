@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
-//! The **`tcp` transport as a droppable busbar plugin**: the `cdylib` a signed tarball of the wire
+//! The `tcp` transport as a droppable plugin: the cdylib packaged in its signed tarball.
 
 #![deny(unsafe_code)]
 
