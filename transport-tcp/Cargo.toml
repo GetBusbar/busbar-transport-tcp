@@ -24,3 +24,7 @@ crate-type = ["rlib"]
 # busbar build that links this crate `[patch]`es the busbar git source to its own tree, so ONE copy
 # of the contract links.
 busbar-contract = { workspace = true }
+
+[dev-dependencies]
+serde_json = { workspace = true }
+jsonschema = { workspace = true }
