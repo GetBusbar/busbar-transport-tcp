@@ -15,4 +15,9 @@ fn an_authority_is_its_one_address_and_a_name_is_not_resolved_here() {
     assert_eq!(resolve("unix:run/x.sock"), None);
     assert_eq!(resolve("example.test:80"), None);
     assert_eq!(resolve("127.0.0.1"), None);
+    assert_eq!(resolve(" 127.0.0.1:80"), None);
+    assert_eq!(resolve("127.0.0.1:80 "), None);
+    assert_eq!(resolve("127.0.0.1:99999"), None);
+    assert_eq!(resolve("UNIX:/run/x.sock"), None);
+    assert_eq!(resolve(""), None);
 }

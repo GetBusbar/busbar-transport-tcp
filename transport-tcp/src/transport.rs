@@ -5,7 +5,8 @@
 //! `io.*`), and the framer ops refused. The host owns every socket; this carrier holds only the
 //! host's opaque handles and owns the policy over them:
 //!
-//! * `listen` binds the address it is asked to, and `accept` takes each connection off it;
+//! * `listen` binds the address it is asked to, and `accept` takes each connection off it; an
+//!   `accept` the host refuses (it retired the listener) FAILS and forgets the listener's token;
 //! * `dial` reads the authority it is lent (`ip:port`, `[v6]:port` or `unix:` and an absolute path,
 //!   byte for byte) as its ONE address — never a name, which it does not resolve: the host's one
 //!   destination judge already pinned the address it may dial — and opens it, one attempt; the
@@ -15,7 +16,8 @@
 //!   carries no frame bit; `write` hands the host what it is offered, and
 //!   a frame's end means nothing to a stream;
 //! * `flush` settles the dial (connected, or the far end's refusal);
-//! * `shut` closes and forgets the connection, retaining it if close fails; `arrival` answers the far
+//! * `shut` closes and forgets the connection, retaining it if the host fails to close a handle it
+//!   still holds (a handle it refuses as not held is forgotten); `arrival` answers the far
 //!   end's address and the local port, as the host reads them off the socket.
 //!
 //! No op holds a byte of its own: a PENDING op moved nothing, so a cancel finds nothing moved.
@@ -129,6 +131,13 @@ fn refusal(e: &IoFailure) -> Refusal {
     }
 }
 
+/// Whether a close leaves nothing to retry: the host closed the handle, or refused it as a handle it
+/// does not hold for this instance (already released, or taken off its table). Only a failure to
+/// close a handle the host still holds is worth retaining the connection for.
+fn let_go(closed: &Result<(), IoFailure>) -> bool {
+    matches!(closed, Ok(()) | Err(IoFailure::Refused(_)))
+}
+
 /// Run `body` over the instance and its I/O, failing the op without either.
 macro_rules! over {
     ($op:literal, $inst:expr, $o:expr, |$c:ident, $io:ident| $body:block) => {
@@ -184,7 +193,8 @@ impl SafeSlot for Listen {
     }
 }
 
-/// `accept`: the next connection off the listener, its far end into the host's buffer.
+/// `accept`: the next connection off the listener, its far end into the host's buffer. A listener
+/// the host no longer holds (retired) answers FAILED, and its token is forgotten.
 pub struct Accept;
 impl SafeSlot for Accept {
     type In = AcceptIn;
@@ -208,6 +218,12 @@ impl SafeSlot for Accept {
                     o.set(|o| &o.conn, token);
                     o.set(|o| &o.peer_written, peer.asked() as u64);
                     Outcome::Ready
+                }
+                // The host no longer holds the listener (it retired it): the accept FAILED, and the
+                // token is forgotten here (`ListenOut::listener`).
+                Poll::Ready(Err(IoFailure::Refused(t))) => {
+                    c.listeners().remove(&i.listener());
+                    o.fail(Refusal::failed(t))
                 }
                 Poll::Ready(Err(e)) => o.fail(refusal(&e)),
             }
@@ -283,7 +299,7 @@ impl SafeSlot for Flush {
                     Outcome::Ready
                 }
                 Poll::Ready(Err(e)) => {
-                    if io.close(h).is_ok() {
+                    if let_go(&io.close(h)) {
                         c.conns().remove(&i.conn());
                     }
                     o.fail(refusal(&e))
@@ -345,7 +361,8 @@ impl SafeSlot for Write {
     }
 }
 
-/// `shut`: close and forget the connection, retaining it on failure so cleanup can retry.
+/// `shut`: close and forget the connection, retaining it if the host could not close a handle it
+/// still holds, so cleanup can retry.
 pub struct Shut;
 impl SafeSlot for Shut {
     type In = ShutIn;
@@ -355,8 +372,11 @@ impl SafeSlot for Shut {
         over!("shut", inst, o, |c, io| {
             let conn = c.conns().remove(&i.conn());
             if let Some(conn) = conn {
-                if let Err(e) = io.close(conn.io) {
+                let closed = io.close(conn.io);
+                if !let_go(&closed) {
                     c.conns().insert(i.conn(), conn);
+                }
+                if let Err(e) = closed {
                     return o.fail(refusal(&e));
                 }
             }

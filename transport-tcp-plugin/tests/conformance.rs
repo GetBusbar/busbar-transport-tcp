@@ -8,7 +8,7 @@ use std::sync::Arc;
 use std::task::{Wake, Waker};
 use std::time::{Duration, Instant};
 
-use busbar_contract::abi::mechanism::call::{AbiStr, Field, InHead, OutHead, Outcome};
+use busbar_contract::abi::mechanism::call::{AbiStr, InHead, OutHead, Outcome};
 use busbar_contract::abi::transport::{
     slot, AcceptIn, AcceptOut, AdoptIn, ArrivalIn, ArrivalOut, BeginIn, ConnIn, ConnOut,
     Destination, DialIn, EmitIn, EncodeIn, FinishIn, FramerOut, FramingIn, IngestIn, IoOut,
@@ -173,9 +173,7 @@ struct Dest {
     authority: String,
     program: String,
     args: Vec<String>,
-    env: Vec<(String, String)>,
     arg_strs: Vec<AbiStr>,
-    env_fields: Vec<Field>,
     kind: u32,
 }
 
@@ -185,50 +183,21 @@ impl Dest {
             authority: a.to_owned(),
             program: String::new(),
             args: Vec::new(),
-            env: Vec::new(),
             arg_strs: Vec::new(),
-            env_fields: Vec::new(),
             kind: DEST_AUTHORITY,
         })
     }
 
-    fn program(v: &serde_json::Value) -> Box<Self> {
-        let program = match text(&v["program"], "dial.program").as_str() {
-            "@conformance-program" => env!("CARGO_BIN_EXE_conformance-program").to_owned(),
-            program => program.to_owned(),
-        };
-        let args = v["args"]
-            .as_array()
-            .map(|a| a.iter().map(|x| text(x, "dial.args")).collect())
-            .unwrap_or_default();
-        /// The program's environment, read by field name: `[name, value]` pairs, absent for none.
-        #[derive(serde::Deserialize)]
-        struct Environment {
-            #[serde(default)]
-            env: Vec<(String, String)>,
-        }
-        let env = serde_json::from_value::<Environment>(v.clone())
-            .unwrap_or_else(|e| panic!("conformance.json: transport.carrier.dial.env: {e}"))
-            .env;
-        let mut d = Box::new(Self {
+    /// The conformance program, run with `args` and no environment.
+    fn program(args: &[&str]) -> Box<Self> {
+        let args: Vec<String> = args.iter().map(|a| (*a).to_owned()).collect();
+        Box::new(Self {
             authority: String::new(),
-            program,
+            program: env!("CARGO_BIN_EXE_conformance-program").to_owned(),
+            arg_strs: args.iter().map(abi).collect(),
             args,
-            env,
-            arg_strs: Vec::new(),
-            env_fields: Vec::new(),
             kind: DEST_PROGRAM,
-        });
-        d.arg_strs = d.args.iter().map(abi).collect();
-        d.env_fields = d
-            .env
-            .iter()
-            .map(|(k, v)| Field {
-                name: abi(k),
-                value: abi(v),
-            })
-            .collect();
-        d
+        })
     }
 
     fn raw(&self) -> Destination {
@@ -239,8 +208,8 @@ impl Dest {
             program: abi(&self.program),
             args: self.arg_strs.as_ptr(),
             args_len: self.arg_strs.len(),
-            env: self.env_fields.as_ptr(),
-            env_len: self.env_fields.len(),
+            env: std::ptr::null(),
+            env_len: 0,
         }
     }
 }
@@ -495,16 +464,11 @@ fn carrier(dropped: bool) -> Vec<(String, String, u64, u64)> {
         results.push((("framer ops").to_string(), answer, crossed, resumed));
     };
 
-    let listens = k["listen"].as_bool().unwrap_or(false);
     let ls = Side::new(&d);
     let bind_at = "127.0.0.1:0";
     host.admit(ls.ticket.ticket(), Admission::Bind(bind_at.into()));
     let mut addr = vec![0_u8; MAX_ADDR as usize];
-    let want = if listens {
-        is("Ready addr=127.0.0.1:*")
-    } else {
-        Want::Starts("Refused")
-    };
+    let want = is("Ready addr=127.0.0.1:*");
     let (listener, bound) = {
         let before = counts(&p);
         let (answer, value) = {
@@ -531,13 +495,12 @@ fn carrier(dropped: bool) -> Vec<(String, String, u64, u64)> {
         results.push((("listen").to_string(), answer, crossed, resumed));
         value
     };
-    let host_listener = listens.then(|| host.made(ls.ticket.ticket())).flatten();
-    assert_eq!(
+    let host_listener = host.made(ls.ticket.ticket());
+    assert!(
         host_listener.is_some(),
-        listens,
-        "only a listening carrier minted a listener"
+        "the listening carrier minted a listener"
     );
-    if listens {
+    {
         let mut far = TcpStream::connect(&bound).expect("the script reaches the listener");
         let _ = far.set_read_timeout(Some(Duration::from_secs(5)));
 
@@ -709,27 +672,10 @@ fn carrier(dropped: bool) -> Vec<(String, String, u64, u64)> {
         };
     }
 
-    let echo = (k["dial"].as_str() == Some("authority")).then(EchoServer::new);
-    let (dest, other) = match &k["dial"] {
-        serde_json::Value::String(a) if a == "authority" => {
-            let at = &echo.as_ref().unwrap().address;
-            host.admit(wr.ticket.ticket(), Admission::Dial(vec![at.clone()]));
-            (
-                Dest::authority(at),
-                Dest::program(
-                    &serde_json::json!({ "program": "@conformance-program", "args": ["echo"] }),
-                ),
-            )
-        }
-        v => {
-            let d = Dest::program(v);
-            host.admit(
-                wr.ticket.ticket(),
-                spawn_admission(&d.program, &d.args, &d.env),
-            );
-            (d, Dest::authority("127.0.0.1:1"))
-        }
-    };
+    let echo = EchoServer::new();
+    let at = &echo.address;
+    host.admit(wr.ticket.ticket(), Admission::Dial(vec![at.clone()]));
+    let (dest, other) = (Dest::authority(at), Dest::program(&["echo"]));
     let conn = {
         let before = counts(&p);
         let (answer, value) = dial(&p, &wr, &dest);
@@ -764,23 +710,14 @@ fn carrier(dropped: bool) -> Vec<(String, String, u64, u64)> {
         .enumerate()
     {
         let frame = text(&x["write"], "exchange.write");
-        let refused = x["refused"].as_bool().unwrap_or(false);
-        let want = if refused {
-            Want::Starts("Failed ")
-        } else {
-            Want::Is(format!("Ready len={}", frame.len()))
-        };
+        let want = Want::Is(format!("Ready len={}", frame.len()));
         {
             let before = counts(&p);
             let answer = write(&p, &wr, conn, frame.as_bytes());
             let after = counts(&p);
             let crossed = after.0 - before.0;
             let resumed = after.1 - before.1;
-            assert_eq!(
-                crossed,
-                if refused { 1 } else { frame.len() as u64 },
-                "write #{n}"
-            );
+            assert_eq!(crossed, frame.len() as u64, "write #{n}");
             match want {
                 Want::Is(expected) => assert_eq!(answer, expected, "{}", &format!("write #{n}")),
                 Want::Starts(prefix) => assert!(
@@ -792,9 +729,6 @@ fn carrier(dropped: bool) -> Vec<(String, String, u64, u64)> {
             };
             results.push((format!("write #{n}"), answer, crossed, resumed));
         };
-        if refused {
-            continue;
-        }
         let answer = text(&x["read"], "exchange.read");
         let answer = lossy(answer.as_bytes());
         let want = Want::Is(format!("Ready bytes={answer:?} end_of_frame=true"));
@@ -945,12 +879,7 @@ fn carrier(dropped: bool) -> Vec<(String, String, u64, u64)> {
     };
 
     let guarded = Side::new(&d);
-    let unadmitted = match dest.kind {
-        DEST_AUTHORITY => Dest::authority("127.0.0.1:9"),
-        _ => Dest::program(
-            &serde_json::json!({ "program": "@conformance-program", "args": ["echo"] }),
-        ),
-    };
+    let unadmitted = Dest::authority("127.0.0.1:9");
     {
         let before = counts(&p);
         let answer = dial(&p, &guarded, &unadmitted).0;
@@ -972,10 +901,7 @@ fn carrier(dropped: bool) -> Vec<(String, String, u64, u64)> {
     let other_side = Side::new(&d);
     host.admit(
         other_side.ticket.ticket(),
-        match other.kind {
-            DEST_AUTHORITY => Admission::Dial(vec![other.authority.clone()]),
-            _ => spawn_admission(&other.program, &other.args, &other.env),
-        },
+        spawn_admission(&other.program, &other.args, &[]),
     );
     {
         let before = counts(&p);

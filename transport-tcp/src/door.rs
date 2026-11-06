@@ -26,9 +26,12 @@ busbar_contract::statement_extensions!(
 /// The published lifecycle settings schema.
 const SETTINGS_SCHEMA: &[u8] = include_bytes!("../settings.schema.json");
 
+/// The Statement's `max_inflight`: the most calls one instance holds in flight (the host clamps it).
+const MAX_INFLIGHT: u32 = 64;
+
 /// The door's Statement: the `tcp` carrier.
 pub const STATEMENT: Statement = {
-    let mut s = statement(KEY, env!("CARGO_PKG_VERSION"), 64)
+    let mut s = statement(KEY, env!("CARGO_PKG_VERSION"), MAX_INFLIGHT)
         .with_kind_tail(&TAIL)
         .with_claims(CLAIM_NAMES);
     s.settings_schema = busbar_contract::abi::mechanism::call::Blob::json(SETTINGS_SCHEMA);

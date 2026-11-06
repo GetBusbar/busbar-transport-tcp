@@ -102,6 +102,8 @@ struct Script {
     /// An op the host fails (`"listen"`, `"accept"`, `"read"`, `"write"`, `"ends"`) with this
     /// outcome and these words.
     fail: Vec<(&'static str, Outcome, &'static str)>,
+    /// Handles whose `io.close` fails (the system could not close them).
+    fail_close: Vec<u64>,
 }
 
 /// The address the scripted host binds, and the peer it accepts.
@@ -191,7 +193,11 @@ extern "C" fn io_read(_: HostCtx, input: *const c_void, out: *mut ServiceOut) ->
     if let Some(r) = failing("read", out) {
         return r;
     }
-    match with(|sc| sc.reads.remove(0)) {
+    // An unscripted read fails in words a test can assert on; a panic here would abort every test.
+    let Some(next) = with(|sc| (!sc.reads.is_empty()).then(|| sc.reads.remove(0))) else {
+        return answer(out, Outcome::Failed, 0, 0, "unscripted read");
+    };
+    match next {
         None => answer(out, Outcome::Pending, 0, 0, ""),
         Some(bytes) => {
             // SAFETY: the host buffer the carrier passed through, `cap` bytes.
@@ -207,6 +213,9 @@ extern "C" fn io_close(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -
     }
     // SAFETY: the carrier's `in`.
     let i = unsafe { input.cast::<HandleIn>().read() };
+    if with(|sc| sc.fail_close.contains(&i.handle)) {
+        return answer(out, Outcome::Failed, 0, 0, "close unavailable");
+    }
     with(|sc| sc.closed.push(i.handle));
     answer(out, Outcome::Ready, 0, 0, "")
 }
@@ -246,6 +255,9 @@ extern "C" fn io_write(_: HostCtx, input: *const c_void, out: *mut ServiceOut) -
     let bytes = unsafe { std::slice::from_raw_parts(i.bytes, i.len) }.to_vec();
     with(|sc| {
         sc.offered.push(bytes);
+        if sc.writes.is_empty() {
+            return answer(out, Outcome::Failed, 0, 0, "unscripted write");
+        }
         match sc.writes.remove(0) {
             None => answer(out, Outcome::Pending, 0, 0, ""),
             Some(n) => answer(out, Outcome::Ready, 0, n as u64, ""),
@@ -1154,4 +1166,200 @@ fn failed_connect_cleanup_can_be_retried_by_shut() {
         Outcome::Ready
     );
     with(|sc| assert_eq!(sc.closed, [HANDLE_BASE + 1]));
+}
+
+/// The host refuses a close of a handle it no longer holds for this instance (it took the socket
+/// off its table, or already released it): there is nothing left to retry, so the carrier forgets
+/// the connection rather than retaining it for the life of the instance.
+#[test]
+fn a_shut_the_host_refuses_as_no_such_handle_forgets_the_connection() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (inst, _t) = open(Script {
+        fail: vec![("close", Outcome::Refused, "no such handle")],
+        ..Script::default()
+    });
+    let (_, conn) = dial(inst, "127.0.0.1:88");
+    assert_eq!(flush(inst, conn), Outcome::Ready);
+    let mut i: ShutIn = z();
+    i.conn = conn;
+    let mut o: OutHead = z();
+    assert_eq!(
+        call(ops().shut, inst, &mut i, &mut o, slot::SHUT),
+        Outcome::Refused
+    );
+    assert_eq!(text(o.error), "no such handle");
+    assert_eq!(
+        read(inst, conn),
+        (Outcome::Failed, "read: no such connection".to_owned())
+    );
+    let mut o: OutHead = z();
+    assert_eq!(
+        call(ops().shut, inst, &mut i, &mut o, slot::SHUT),
+        Outcome::Ready,
+        "the forgotten connection shuts idempotently"
+    );
+}
+
+/// A failed connect whose handle the host refuses to close as unknown is forgotten too.
+#[test]
+fn a_failed_connect_whose_close_is_refused_forgets_the_connection() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (inst, _t) = open(Script {
+        fail_ready: vec![HANDLE_BASE + 1],
+        fail: vec![("close", Outcome::Refused, "no such handle")],
+        ..Script::default()
+    });
+    let (_, conn) = dial(inst, "127.0.0.1:88");
+    assert_eq!(flush(inst, conn), Outcome::Failed);
+    assert_eq!(flush(inst, conn), Outcome::Failed);
+    assert_eq!(
+        read(inst, conn),
+        (Outcome::Failed, "read: no such connection".to_owned())
+    );
+}
+
+/// An accept on a listener the host has retired is FAILED (not a policy refusal), and the carrier
+/// forgets the token there (`ListenOut::listener`).
+#[test]
+fn an_accept_on_a_retired_listener_fails_and_forgets_the_token() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (inst, _t) = open(Script::default());
+    let (mut addr, mut peer) = ([0_u8; 64], [0_u8; 64]);
+    let (r, lo, _) = listen(inst, "127.0.0.1:0", &mut addr);
+    assert_eq!(r, Outcome::Ready);
+    with(|sc| sc.fail = vec![("accept", Outcome::Refused, "no such handle")]);
+    let (r, _, said) = accept(inst, lo.listener, &mut peer);
+    assert_eq!((r, said.as_str()), (Outcome::Failed, "no such handle"));
+    with(|sc| sc.fail.clear());
+    let (r, _, said) = accept(inst, lo.listener, &mut peer);
+    assert_eq!(
+        (r, said.as_str()),
+        (Outcome::Failed, "accept: no such listener")
+    );
+    let mut ci: InHead = z();
+    let mut co: OutHead = z();
+    assert_eq!(
+        call(ops().head.close, inst, &mut ci, &mut co, life::CLOSE),
+        Outcome::Ready
+    );
+    with(|sc| {
+        assert!(
+            sc.closed.is_empty(),
+            "the retired listener is not closed again"
+        )
+    });
+}
+
+/// Instance close goes on past a handle it cannot close: every other held handle is still closed.
+#[test]
+fn close_goes_on_past_a_handle_that_fails_to_close() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (inst, _t) = open(Script {
+        fail_close: vec![LISTEN_BASE + 1],
+        ..Script::default()
+    });
+    let mut addr = [0_u8; 64];
+    let (r, _, _) = listen(inst, "127.0.0.1:0", &mut addr);
+    assert_eq!(r, Outcome::Ready);
+    dial(inst, "127.0.0.1:86");
+    let mut ci: InHead = z();
+    let mut co: OutHead = z();
+    assert_eq!(
+        call(ops().head.close, inst, &mut ci, &mut co, life::CLOSE),
+        Outcome::Ready
+    );
+    with(|sc| assert_eq!(sc.closed, [HANDLE_BASE + 1]));
+}
+
+/// A dial with no destination, or an authority that is not UTF-8, fails before any host I/O.
+#[test]
+fn a_dial_without_a_readable_authority_fails_before_opening_anything() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (inst, _t) = open(Script::default());
+    let mut i: DialIn = z();
+    let mut o: ConnOut = z();
+    assert_eq!(
+        call(ops().dial, inst, &mut i, &mut o, slot::DIAL),
+        Outcome::Failed
+    );
+    assert_eq!(text(o.head.error), "dial: no destination");
+
+    let bad = [0xff_u8, 0xfe];
+    let mut dest: Destination = z();
+    dest.kind = DEST_AUTHORITY;
+    // SAFETY: `bad` outlives the call.
+    dest.authority = unsafe { AbiStr::from_raw_parts(bad.as_ptr(), bad.len()) };
+    let mut i: DialIn = z();
+    i.dest = &dest;
+    let mut o: ConnOut = z();
+    assert_eq!(
+        call(ops().dial, inst, &mut i, &mut o, slot::DIAL),
+        Outcome::Failed
+    );
+    assert_eq!(text(o.head.error), "dial: the authority is not UTF-8");
+    with(|sc| assert!(sc.opened.is_empty()));
+}
+
+/// `open` reads the same no-settings document as `validate`: a key or a non-object opens nothing.
+#[test]
+fn open_refuses_settings_it_does_not_read() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for settings in [&b"{\"nodelay\":true}"[..], b"[1]", b"null"] {
+        let tables = Box::new(HostTables {
+            size: size_of::<HostTables>() as u32,
+            _reserved: 0,
+            ctx: HostCtx::NONE,
+            wake: None,
+            conns: std::ptr::null(),
+            services: std::ptr::null(),
+            io: &IO,
+        });
+        let mut err = [0_u8; 256];
+        let mut i: OpenIn = z();
+        i.host = &*tables;
+        i.settings = Blob::of(settings);
+        i.err_buf = err.as_mut_ptr();
+        i.err_cap = err.len();
+        let mut o: OpenOut = z();
+        let r = call(
+            ops().head.open,
+            std::ptr::null_mut(),
+            &mut i,
+            &mut o,
+            life::OPEN,
+        );
+        assert_eq!(r, Outcome::Failed, "{}", String::from_utf8_lossy(settings));
+        assert!(o.instance.is_null(), "no instance opened");
+    }
+}
+
+/// A transient accept failure (the system's, not a refusal of the handle) keeps the listener.
+#[test]
+fn a_failed_accept_keeps_a_listener_the_host_still_holds() {
+    let _one = ONE
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let (inst, _t) = open(Script::default());
+    let (mut addr, mut peer) = ([0_u8; 64], [0_u8; 64]);
+    let (r, lo, _) = listen(inst, "127.0.0.1:0", &mut addr);
+    assert_eq!(r, Outcome::Ready);
+    with(|sc| sc.fail = vec![("accept", Outcome::Failed, "accept boom")]);
+    let (r, _, said) = accept(inst, lo.listener, &mut peer);
+    assert_eq!((r, said.as_str()), (Outcome::Failed, "accept boom"));
+    with(|sc| sc.fail.clear());
+    let (r, ao, _) = accept(inst, lo.listener, &mut peer);
+    assert_eq!(r, Outcome::Ready);
+    assert_ne!(ao.conn, 0);
 }

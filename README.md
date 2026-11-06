@@ -15,11 +15,14 @@ First-party signed kind:transport plugin cdylib: the tcp transport, packaged as 
 
 ## Config
 
-Configured under the `tcp` module name.
+Configured under the `tcp` module name. It takes no settings: empty settings mean `{}`, and any
+key, `null` or non-object is refused (see `transport-tcp/settings.schema.json`).
 
 ## Connection cleanup
 
-If host I/O cannot close a connection, `shut` reports the failure and retains the connection for a later close attempt. Successful closes and closing an unknown connection remain idempotent.
+If host I/O cannot close a connection, `shut` reports the failure and retains the connection for a later close attempt. A close the host refuses because it no longer holds the handle (it already released it, or took the socket off its table) is reported but leaves nothing to retry, so the connection is forgotten. The same rule applies when `flush` finds that a dial failed to connect: the carrier closes the
+connection, and keeps it for a later `shut` only if the host could not close a handle it still
+holds. Successful closes and closing an unknown connection remain idempotent.
 
 ## Build
 
