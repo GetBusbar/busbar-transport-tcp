@@ -193,7 +193,10 @@ impl Dest {
     }
 
     fn program(v: &serde_json::Value) -> Box<Self> {
-        let program = text(&v["program"], "dial.program");
+        let program = match text(&v["program"], "dial.program").as_str() {
+            "@conformance-program" => env!("CARGO_BIN_EXE_conformance-program").to_owned(),
+            program => program.to_owned(),
+        };
         let args = v["args"]
             .as_array()
             .map(|a| a.iter().map(|x| text(x, "dial.args")).collect())
@@ -713,7 +716,9 @@ fn carrier(dropped: bool) -> Vec<(String, String, u64, u64)> {
             host.admit(wr.ticket.ticket(), Admission::Dial(vec![at.clone()]));
             (
                 Dest::authority(at),
-                Dest::program(&serde_json::json!({ "program": "/bin/cat" })),
+                Dest::program(
+                    &serde_json::json!({ "program": "@conformance-program", "args": ["echo"] }),
+                ),
             )
         }
         v => {
@@ -942,7 +947,9 @@ fn carrier(dropped: bool) -> Vec<(String, String, u64, u64)> {
     let guarded = Side::new(&d);
     let unadmitted = match dest.kind {
         DEST_AUTHORITY => Dest::authority("127.0.0.1:9"),
-        _ => Dest::program(&serde_json::json!({ "program": "/bin/false" })),
+        _ => Dest::program(
+            &serde_json::json!({ "program": "@conformance-program", "args": ["echo"] }),
+        ),
     };
     {
         let before = counts(&p);
@@ -1081,16 +1088,14 @@ fn program_exit(host: &HostIo) -> String {
         slot: u32::MAX,
         generation: 1,
     };
-    host.admit(
-        ticket,
-        spawn_admission("/bin/sh", &["-c".into(), "sleep 5 & exit 3".into()], &[]),
-    );
+    let program = env!("CARGO_BIN_EXE_conformance-program");
+    host.admit(ticket, spawn_admission(program, &["exit-open".into()], &[]));
     let spawned = host.spawn(
         OWNER,
         ticket,
         &Spawn {
-            program: "/bin/sh",
-            args: &["-c", "sleep 5 & exit 3"],
+            program,
+            args: &["exit-open"],
             env: &[],
         },
     );
