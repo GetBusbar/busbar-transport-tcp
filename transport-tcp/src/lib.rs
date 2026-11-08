@@ -12,7 +12,7 @@ mod meta;
 mod transport;
 
 /// The door: the one entry, linked here and exported by the dropped-in build alike.
-pub use door::door;
+pub use door::{door, MACRO_DOOR};
 
 /// The transport axis entry: its key, supported lower layers, session support, and door.
 pub mod linked {

@@ -5,7 +5,7 @@
 
 #![deny(unsafe_code)]
 
-pub use busbar_transport_tcp::*;
+pub use busbar_transport_tcp::{door, linked, MACRO_DOOR};
 
 /// The exported door: the macro's `#[no_mangle]` symbol is the one exemption.
 #[allow(unsafe_code)]

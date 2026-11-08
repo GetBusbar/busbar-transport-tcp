@@ -64,6 +64,7 @@ impl Conn {
 type State = Held<Carried>;
 
 impl Life for Carried {
+    type Kind = busbar_contract::plugin::markers::TransportKind;
     /// A PENDING carrier op moved nothing, so a cancel finds nothing moved.
     const CANCEL: u32 = CANCEL_NOTHING_MOVED;
 
@@ -86,7 +87,7 @@ impl Life for Carried {
     }
 
     /// `close`: every host handle this instance still holds, listeners and connections, is closed
-    fn close(&self, host: Option<&Host>) {
+    fn close(&self, host: Option<&Host<busbar_contract::plugin::markers::TransportKind>>) {
         let Some(mut io) = host.map(|h| h.io(Ticket::NONE)).filter(Io::armed) else {
             return;
         };
@@ -166,11 +167,12 @@ busbar_contract::not_served! {
 /// `listen`: bind the address, and answer the address bound into the host's buffer.
 pub struct Listen;
 impl SafeSlot for Listen {
+    type Kind = busbar_contract::plugin::markers::TransportKind;
     type In = ListenIn;
     type Out = ListenOut;
     type State = State;
     fn call(
-        inst: Instance<'_, State>,
+        inst: Instance<'_, State, busbar_contract::plugin::markers::TransportKind>,
         i: Lent<'_, ListenIn>,
         mut o: Out<'_, ListenOut>,
     ) -> Outcome {
@@ -197,11 +199,12 @@ impl SafeSlot for Listen {
 /// the host no longer holds (retired) answers FAILED, and its token is forgotten.
 pub struct Accept;
 impl SafeSlot for Accept {
+    type Kind = busbar_contract::plugin::markers::TransportKind;
     type In = AcceptIn;
     type Out = AcceptOut;
     type State = State;
     fn call(
-        inst: Instance<'_, State>,
+        inst: Instance<'_, State, busbar_contract::plugin::markers::TransportKind>,
         i: Lent<'_, AcceptIn>,
         mut o: Out<'_, AcceptOut>,
     ) -> Outcome {
@@ -241,10 +244,15 @@ pub fn resolve(authority: &str) -> Option<String> {
 /// `dial`: open the authority's one address and return its token; `flush` settles the connect.
 pub struct Dial;
 impl SafeSlot for Dial {
+    type Kind = busbar_contract::plugin::markers::TransportKind;
     type In = DialIn;
     type Out = ConnOut;
     type State = State;
-    fn call(inst: Instance<'_, State>, i: Lent<'_, DialIn>, mut o: Out<'_, ConnOut>) -> Outcome {
+    fn call(
+        inst: Instance<'_, State, busbar_contract::plugin::markers::TransportKind>,
+        i: Lent<'_, DialIn>,
+        mut o: Out<'_, ConnOut>,
+    ) -> Outcome {
         let Some(dest) = i.dest() else {
             return o.fail(Refusal::failed("dial: no destination"));
         };
@@ -278,10 +286,15 @@ impl SafeSlot for Dial {
 /// `flush`: a dial settles — connected; or refused, and the dial answers the far end's refusal.
 pub struct Flush;
 impl SafeSlot for Flush {
+    type Kind = busbar_contract::plugin::markers::TransportKind;
     type In = ConnIn;
     type Out = OutHead;
     type State = State;
-    fn call(inst: Instance<'_, State>, i: Lent<'_, ConnIn>, mut o: Out<'_, OutHead>) -> Outcome {
+    fn call(
+        inst: Instance<'_, State, busbar_contract::plugin::markers::TransportKind>,
+        i: Lent<'_, ConnIn>,
+        mut o: Out<'_, OutHead>,
+    ) -> Outcome {
         over!("flush", inst, o, |c, io| {
             let (h, settled) = match c.conns().get(&i.conn()) {
                 Some(conn) => (conn.io, conn.settled),
@@ -313,10 +326,15 @@ impl SafeSlot for Flush {
 /// of the stream, the clean end (`len` 0) carrying no frame bit.
 pub struct Read;
 impl SafeSlot for Read {
+    type Kind = busbar_contract::plugin::markers::TransportKind;
     type In = ReadIn;
     type Out = IoOut;
     type State = State;
-    fn call(inst: Instance<'_, State>, i: Lent<'_, ReadIn>, mut o: Out<'_, IoOut>) -> Outcome {
+    fn call(
+        inst: Instance<'_, State, busbar_contract::plugin::markers::TransportKind>,
+        i: Lent<'_, ReadIn>,
+        mut o: Out<'_, IoOut>,
+    ) -> Outcome {
         over!("read", inst, o, |c, io| {
             let Some(h) = c.handle(i.conn()) else {
                 return o.fail(Refusal::failed("read: no such connection"));
@@ -340,10 +358,15 @@ impl SafeSlot for Read {
 /// `write`: what the socket takes of the bytes offered.
 pub struct Write;
 impl SafeSlot for Write {
+    type Kind = busbar_contract::plugin::markers::TransportKind;
     type In = WriteIn;
     type Out = IoOut;
     type State = State;
-    fn call(inst: Instance<'_, State>, i: Lent<'_, WriteIn>, mut o: Out<'_, IoOut>) -> Outcome {
+    fn call(
+        inst: Instance<'_, State, busbar_contract::plugin::markers::TransportKind>,
+        i: Lent<'_, WriteIn>,
+        mut o: Out<'_, IoOut>,
+    ) -> Outcome {
         let bytes = i.bytes();
         over!("write", inst, o, |c, io| {
             let Some(h) = c.handle(i.conn()) else {
@@ -365,10 +388,15 @@ impl SafeSlot for Write {
 /// still holds, so cleanup can retry.
 pub struct Shut;
 impl SafeSlot for Shut {
+    type Kind = busbar_contract::plugin::markers::TransportKind;
     type In = ShutIn;
     type Out = OutHead;
     type State = State;
-    fn call(inst: Instance<'_, State>, i: Lent<'_, ShutIn>, mut o: Out<'_, OutHead>) -> Outcome {
+    fn call(
+        inst: Instance<'_, State, busbar_contract::plugin::markers::TransportKind>,
+        i: Lent<'_, ShutIn>,
+        mut o: Out<'_, OutHead>,
+    ) -> Outcome {
         over!("shut", inst, o, |c, io| {
             let conn = c.conns().remove(&i.conn());
             if let Some(conn) = conn {
@@ -388,11 +416,12 @@ impl SafeSlot for Shut {
 /// `arrival`: the far end's address and the local port, as the host reads them off the socket.
 pub struct Arrival;
 impl SafeSlot for Arrival {
+    type Kind = busbar_contract::plugin::markers::TransportKind;
     type In = ArrivalIn;
     type Out = ArrivalOut;
     type State = State;
     fn call(
-        inst: Instance<'_, State>,
+        inst: Instance<'_, State, busbar_contract::plugin::markers::TransportKind>,
         i: Lent<'_, ArrivalIn>,
         mut o: Out<'_, ArrivalOut>,
     ) -> Outcome {

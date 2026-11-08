@@ -68,8 +68,8 @@ fn bind(d: &Dispatcher) -> Bind {
     }
 }
 fn counts(p: &Plugin<Transport>) -> (u64, u64) {
-    let resumes = p.inner.resumes.load(Ordering::SeqCst);
-    (p.inner.crossings.load(Ordering::SeqCst) - resumes, resumes)
+    let resumes = p.test_invocations().1;
+    (p.test_invocations().0 - resumes, resumes)
 }
 fn artifact() -> std::path::PathBuf {
     let exe = std::env::current_exe().unwrap();
@@ -362,7 +362,10 @@ enum Want {
 fn carrier(dropped: bool) -> Vec<(String, String, u64, u64)> {
     let inputs: serde_json::Value = serde_json::from_str(include_str!("conformance.json")).unwrap();
     let k = &inputs["transport"]["carrier"];
-    let d = Arc::new(Dispatcher::new(DispatchConfig::default()));
+    let d = Arc::new(Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    ));
     let host = Arc::new(HostIo::default());
     assert!(d.install_io(Arc::clone(&host) as _));
     let row = LinkedRow::of(busbar_transport_tcp::door).unwrap();
