@@ -36,9 +36,9 @@ repository = "https://github.com/GetBusbar/busbar-transport-tcp"
 needless_update = "allow"
 
 [workspace.dependencies]
-busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "b0ae4cafc8bb7db78541e0d9c3b14cf0a6a7dcec" }
-busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "b0ae4cafc8bb7db78541e0d9c3b14cf0a6a7dcec" }
-busbar-core-connector = { git = "https://github.com/GetBusbar/busbar", rev = "b0ae4cafc8bb7db78541e0d9c3b14cf0a6a7dcec" }
+busbar-contract = { git = "https://github.com/GetBusbar/busbar", rev = "df111e05c3a4bbfb91e86ab6182e57e4e3a4e82b" }
+busbar-plugin-loader = { git = "https://github.com/GetBusbar/busbar", rev = "df111e05c3a4bbfb91e86ab6182e57e4e3a4e82b" }
+busbar-core-connector = { git = "https://github.com/GetBusbar/busbar", rev = "df111e05c3a4bbfb91e86ab6182e57e4e3a4e82b" }
 # busbar's root [workspace.dependencies], third-party rows, at 892773b8ed5d0cc78694bbcf5a10d89346ad61e6
 arc-swap = "1"
 async-trait = "0.1"
