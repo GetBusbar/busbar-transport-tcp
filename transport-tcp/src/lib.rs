@@ -28,3 +28,6 @@ pub mod linked {
 #[cfg(test)]
 #[path = "tests/resolve_tests.rs"]
 mod resolve_tests;
+
+// Source-owned integration tests are compiled only by the assembling host test harness.
+include!(concat!(env!("OUT_DIR"), "/context_test_source.rs"));
