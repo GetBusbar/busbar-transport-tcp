@@ -39,3 +39,6 @@ name = "conformance-program"
 path = "tests/support/program.rs"
 test = false
 bench = false
+
+[package.metadata.busbar.test-artifacts]
+cdylib = ["BUSBAR_TEST_TCP_CDYLIB"]
