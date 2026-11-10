@@ -477,7 +477,7 @@ fn every_read_is_a_frame_of_the_stream_a_pending_one_moves_nothing_and_shut_clos
         let r = call(ops().read, inst, &mut i, &mut o, slot::READ);
 
         if r == Outcome::Ready {
-            assert_eq!(check_io(&o, 16), Ok(()));
+            assert_eq!(check_io(&o, 16, READ_END_OF_FRAME), Ok(()));
         }
         (r, o.len, o.flags)
     };
@@ -852,7 +852,7 @@ fn write(inst: *mut c_void, conn: u64, bytes: &[u8]) -> (Outcome, u64, String) {
     let mut o: IoOut = z();
     let r = call(ops().write, inst, &mut i, &mut o, slot::WRITE);
     if r == Outcome::Ready {
-        assert_eq!(check_io(&o, bytes.len() as u64), Ok(()));
+        assert_eq!(check_io(&o, bytes.len() as u64, 0), Ok(()));
     }
     (r, o.len, text(o.head.error))
 }
