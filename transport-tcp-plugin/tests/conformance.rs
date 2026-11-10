@@ -1237,3 +1237,25 @@ fn same_observations(left: &[Observation], right: &[Observation]) -> bool {
         .map(|(n, a, c, _)| (n, a, c))
         .eq(right.iter().map(|(n, a, c, _)| (n, a, c)))
 }
+
+// Product expectations formerly coupled to the core loader's transport witness.
+#[test]
+fn tcp_carrier_metadata_is_owned_by_tcp() {
+    let d = Dispatcher::new(
+        DispatchConfig::default(),
+        busbar_contract::services::test_caller_binding(),
+    );
+    for p in [
+        dispatch::load_linked::<Transport>(&row(), bind(&d)).expect("linked TCP"),
+        dispatch::load_dropped::<Transport>(&cdylib(), &row().statement, bind(&d))
+            .expect("dropped TCP"),
+    ] {
+        let facts = p
+            .context::<busbar_plugin_loader::dispatch::kinds::transport::TransportFacts>()
+            .unwrap();
+        assert_eq!(facts.role, busbar_contract::abi::transport::ROLE_CARRIER);
+        assert_eq!(facts.claims, ["tcp"]);
+        assert!(facts.composes_over.is_empty());
+        open(&p);
+    }
+}
