@@ -234,11 +234,11 @@ impl SafeSlot for Accept {
     }
 }
 
-/// The address a dial opens verbatim: an IP socket address or a `unix:` absolute path.
+/// Whether the authority is a literal address this carrier dials: an IP socket address or a `unix:`
+/// absolute path. A name is never resolved here.
 #[must_use]
-pub fn resolve(authority: &str) -> Option<String> {
-    let literal = authority.starts_with("unix:/") || authority.parse::<SocketAddr>().is_ok();
-    literal.then(|| authority.to_owned())
+pub fn resolve(authority: &str) -> bool {
+    authority.starts_with("unix:/") || authority.parse::<SocketAddr>().is_ok()
 }
 
 /// `dial`: open the authority's one address and return its token; `flush` settles the connect.
@@ -264,13 +264,13 @@ impl SafeSlot for Dial {
         let Ok(authority) = dest.authority().as_str() else {
             return o.fail(Refusal::failed("dial: the authority is not UTF-8"));
         };
-        let Some(addr) = resolve(authority) else {
+        if !resolve(authority) {
             return o.fail(Refusal::refused(
                 "dial: the authority is not an IP literal or unix: path; the carrier never resolves a name",
             ));
-        };
+        }
         over!("dial", inst, o, |c, io| {
-            match io.open(&addr) {
+            match io.open(authority) {
                 Ok(h) => {
                     let token = c.mint();
                     c.conns().insert(token, Conn::new(h, false));
@@ -433,7 +433,7 @@ impl SafeSlot for Arrival {
             match io.ends(h, &mut peer) {
                 Ok((port, n)) => {
                     let mut buf = i.peer_buf();
-                    buf.extend(&peer[..n]);
+                    buf.extend(&peer[..n.min(peer.len())]);
                     o.set(|o| &o.local_port, port);
                     o.set(|o| &o.peer_written, buf.written() as u64);
                     o.set(|o| &o.peer_needed, buf.needed() as u64);
