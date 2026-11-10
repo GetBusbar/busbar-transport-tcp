@@ -1,6 +1,21 @@
 // SPDX-License-Identifier: Apache-2.0
 // Copyright (C) 2026 Busbar Inc and contributors
 
+// The peer is supplied by the assembling host through the transport kind declaration.
+fn assembled_http_peer() -> busbar_contract::abi::mechanism::door::DoorFn {
+    crate::dist_root_install::install();
+    let mut peers = crate::LINKED_TRANSPORT_DOORS
+        .iter()
+        .filter_map(|(_, door)| {
+            let facts = crate::root::loader::dispatch::kinds::transport::stated(*door)
+                .expect("assembled transport has a valid kind declaration");
+            facts.claims.contains(&"http").then_some(*door)
+        });
+    let peer = peers.next().expect("the assembly supplies the HTTP peer");
+    assert!(peers.next().is_none(), "the HTTP peer claim is unambiguous");
+    peer
+}
+
 #[test]
 fn a_door_root_row_links_with_the_key_layers_and_session_its_statement_states() {
     let row = linked_transport!(busbar_transport_tcp::door);
@@ -28,8 +43,12 @@ fn a_door_root_row_links_with_the_key_layers_and_session_its_statement_states() 
         "the boot's admission of its door answers the same key"
     );
 
-    let framer = linked_transport!(busbar_transport_http::door);
-    let stated = row_facts(busbar_transport_http::door);
+    let framer = *crate::LINKED
+        .transports
+        .iter()
+        .find(|row| (row.claims)().contains(&"http"))
+        .expect("the assembly supplies the HTTP peer composition row");
+    let stated = row_facts(assembled_http_peer());
     assert_eq!((framer.key)(), "http");
     assert_eq!((framer.composes_over)(), stated.composes_over);
     assert!(!stated.session, "the actual HTTP claim carries no session");
