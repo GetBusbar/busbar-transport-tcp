@@ -29,3 +29,8 @@ busbar-contract = { workspace = true }
 serde_json = { workspace = true }
 jsonschema = { workspace = true }
 busbar-contract = { workspace = true, features = ["test-seal"] }
+
+[package.metadata.busbar.test-contexts]
+linked_transport_rows = [{ path = "tests/root/linked_door_root.rs" }]
+boot_carrier_locate = [{ path = "tests/root/boot_locate.rs" }]
+listener_carrier = [{ path = "tests/root/listener_carrier.rs" }]
